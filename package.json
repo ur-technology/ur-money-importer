@@ -1,0 +1,48 @@
+{
+  "name": "ur-money-importer",
+  "version": "1.0.3",
+  "description": "import data into firebase database for ur money app",
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/ur-technology/ur-money-importer.git"
+  },
+  "main": "build/main.js",
+  "engines": {
+    "node": "4.4.7",
+    "npm": "3.9.5"
+  },
+  "private": true,
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "./node_modules/.bin/tsc --module commonjs --outDir build/ --noImplicitAny --sourceMap --target ES5 lib/*.ts && node build/main.js",
+    "debug": "killall -9 node; ./node_modules/.bin/tsc --module commonjs --outDir build/ --noImplicitAny --sourceMap --target ES5 lib/*.ts && node-debug --web-host=0.0.0.0 build/main.js",
+    "postinstall": "./node_modules/.bin/typings install"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bignumber.js": "^2.4.0",
+    "dotenv": "^2.0.0",
+    "ethereumjs-tx": "^1.1.2",
+    "firebase": "^3.6.1",
+    "is-there": "^4.3.3",
+    "keythereum": "^0.2.6",
+    "lodash": "^4.14.0",
+    "loglevel": "^1.4.1",
+    "moment": "^2.14.1",
+    "node-rest-client": "^2.0.1",
+    "promise-sequence": "^0.2.2",
+    "request": "^2.74.0",
+    "restler": "^3.4.0",
+    "sendgrid": "^4.7.1",
+    "sprintf-js": "^1.0.3",
+    "throng": "^4.0.0",
+    "twilio": "^2.9.1",
+    "typescript": "^1.8.10",
+    "typings": "^1.3.2",
+    "web3": "^0.17.0-alpha"
+  },
+  "devDependencies": {
+    "node-inspector": "git://github.com/iamfrontender/node-inspector.git"
+  }
+}
