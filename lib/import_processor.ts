@@ -12,7 +12,7 @@ export class ImportProcessor {
   preexistingUsers: any[] = [];
   sponsorsQueue: any[];
   numUsersImported: number = 0;
-  numUsersWithSponsorUpdates: number = 0;
+  usersWithSponsorUpdates: any[] = [];
   numUsersNotInDownline: number = 0;
 
   web3() {
@@ -32,9 +32,7 @@ export class ImportProcessor {
   start(): Promise<any> {
     return new Promise((resolve, reject) => {
       let self = this;
-      self.db.ref('/importedUsers').remove().then(() => {
-        return self.buildPrefineryUsers();
-      }).then(() => {
+      self.buildPrefineryUsers().then(() => {
         log.info(`num candidateUsers=${_.size(self.candidateUsers)}`);
         return self.db.ref(`/users`).once("value");
       }).then((snapshot: firebase.database.DataSnapshot) => {
@@ -56,21 +54,18 @@ export class ImportProcessor {
         }
         return self.processAllSponsors();
       }).then(() => {
-        let prexistingPrefineryIds = _.compact(
-          _.map(self.preexistingUsers, (u) => { return u.prefineryUser && u.prefineryUser.id; })
-        );
+        let prefineryIdsOfUsersWithSponsorUpdates = _.map(self.usersWithSponsorUpdates, (u) => { return u.prefineryUser && u.prefineryUser.id; });
         let usersNotInDownline = _.filter(self.candidateUsers, (u) => {
-          let userPreviouslyImported = u.prefineryUser && _.includes(prexistingPrefineryIds, u.prefineryUser.id);
-          return !u.userId && !userPreviouslyImported;
+          return !u.userId && !_.includes(prefineryIdsOfUsersWithSponsorUpdates, u.prefineryUser.id);
         });
         self.numUsersNotInDownline = _.size(usersNotInDownline);
 
         log.info(`${_.size(self.candidateUsers)} total candidate users considered`);
         log.info(`${_.size(_.uniq(_.map(self.candidateUsers,'email')))} unique emails`);
         log.info(`  ${self.numUsersImported} users imported`);
-        log.info(`  ${self.numUsersWithSponsorUpdates} users had their sponsors updated`);
+        log.info(`  ${_.size(self.usersWithSponsorUpdates)} users had their sponsors updated`);
         log.info(`  ${self.numUsersNotInDownline} users not in downline`);
-        let discrepancies = _.size(self.candidateUsers) - ( self.numUsersImported + self.numUsersWithSponsorUpdates + self.numUsersNotInDownline);
+        let discrepancies = _.size(self.candidateUsers) - ( self.numUsersImported + _.size(self.usersWithSponsorUpdates) + self.numUsersNotInDownline);
         if (discrepancies === 0) {
           log.info(`  no discrepancies`);
         } else {
@@ -132,7 +127,7 @@ export class ImportProcessor {
       _.each(invitees, (invitee) => {
         invitee.sponsor = _.pick(sponsor, ['userId', 'name', 'profilePhotoUrl']);
         invitee.downlineLevel = sponsor.downlineLevel + 1;
-        let usersRef = self.db.ref('/importedUsers');
+        let usersRef = self.db.ref('/users');
         let preexistingUserBasedOnId = _.find(self.preexistingUsers, (u) => {
           return u.prefineryUser && u.prefineryUser.id == invitee.prefineryUser.id;
         });
@@ -140,7 +135,7 @@ export class ImportProcessor {
           log.info(`only updating sponsor info for prefinery user ${invitee.prefineryUser.id } ${invitee.email} because it was previously imported`);
           usersRef.child(preexistingUserBasedOnId.userId).child('sponsor').set(sponsor).then(() => {
             numInviteesRemaining--;
-            self.numUsersWithSponsorUpdates++;
+            self.usersWithSponsorUpdates.push(invitee);
             if (!finalized && numInviteesRemaining == 0) {
               resolve(true);
               finalized = true;
