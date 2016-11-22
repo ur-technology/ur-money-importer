@@ -8,9 +8,12 @@ export class ImportProcessor {
   env: any;
   db: any;
   _web3: any;
-  newUsers: any[] = [];
+  candidateUsers: any[] = [];
+  preexistingUsers: any[] = [];
   sponsorsQueue: any[];
-  numImportedUsers: number = 0;
+  numUsersImported: number = 0;
+  numUsersWithSponsorUpdates: number = 0;
+  numUsersNotInDownline: number = 0;
 
   web3() {
     if (!this._web3) {
@@ -32,17 +35,18 @@ export class ImportProcessor {
       self.db.ref('/importedUsers').remove().then(() => {
         return self.buildPrefineryUsers();
       }).then(() => {
-        log.info(`numNewUsers=${_.size(self.newUsers)}`);
+        log.info(`num candidateUsers=${_.size(self.candidateUsers)}`);
         return self.db.ref(`/users`).once("value");
       }).then((snapshot: firebase.database.DataSnapshot) => {
-        self.sponsorsQueue = [];
         let userMapping = snapshot.val();
         _.each(userMapping, (user, userId) => {
           if (user.email) {
             user.userId = userId;
-            self.sponsorsQueue.push(user);
+            self.preexistingUsers.push(user);
           }
         });
+        self.sponsorsQueue = _.clone(self.preexistingUsers);
+
         let sponsorsWithoutDownlineLevel = _.reject(self.sponsorsQueue, (user) => {return !!user.downlineLevel;});
         if (_.size(sponsorsWithoutDownlineLevel) > 0) {
           log.info(`number of sponsorsWithoutDownlineLevel=${_.size(sponsorsWithoutDownlineLevel)}`);
@@ -52,13 +56,25 @@ export class ImportProcessor {
         }
         return self.processAllSponsors();
       }).then(() => {
-        let numNotImportedUsers = _.size(self.newUsers) - self.numImportedUsers;
-        log.info(`${_.size(self.newUsers)} total users; ${self.numImportedUsers} imported; ${numNotImportedUsers} not imported`);
+        let prexistingPrefineryIds = _.compact(
+          _.map(self.preexistingUsers, (u) => { return u.prefineryUser && u.prefineryUser.id; })
+        );
+        let usersNotInDownline = _.filter(self.candidateUsers, (u) => {
+          let userPreviouslyImported = u.prefineryUser && _.includes(prexistingPrefineryIds, u.prefineryUser.id);
+          return !u.userId && !userPreviouslyImported;
+        });
+        self.numUsersNotInDownline = _.size(usersNotInDownline);
 
-        let newUsersWithoutUserId = _.reject(self.newUsers, (newUser) => { return newUser.userId; });
-        if (_.size(newUsersWithoutUserId) > 0) {
-          log.info(`num newUsersWithoutUserId=${_.size(newUsersWithoutUserId)}`);
-          _.each(newUsersWithoutUserId, (u) => { log.info(u.email); });
+        log.info(`${_.size(self.candidateUsers)} total candidate users considered`);
+        log.info(`${_.size(_.uniq(_.map(self.candidateUsers,'email')))} unique emails`);
+        log.info(`  ${self.numUsersImported} users imported`);
+        log.info(`  ${self.numUsersWithSponsorUpdates} users had their sponsors updated`);
+        log.info(`  ${self.numUsersNotInDownline} users not in downline`);
+        let discrepancies = _.size(self.candidateUsers) - ( self.numUsersImported + self.numUsersWithSponsorUpdates + self.numUsersNotInDownline);
+        if (discrepancies === 0) {
+          log.info(`  no discrepancies`);
+        } else {
+          log.info(`  ${discrepancies} discrepancies`);
         }
         resolve();
       }, (error: any) => {
@@ -94,12 +110,18 @@ export class ImportProcessor {
         return;
       }
 
-      let invitees = _.filter(self.newUsers, (newUser) => {
-        return newUser.prefineryUser.sponsorEmail === sponsor.email;
+      let invitees = _.filter(self.candidateUsers, (u) => {
+        return sponsor.email === u.prefineryUser.sponsorEmail;
+      });
+      invitees = _.filter(invitees, (u) => {
+        if (u.userId) {
+          log.info(`skipping prefinery user ${u.prefineryUser.id} ${u.email} because he was already imported in this batch`);
+          return false;
+        } else {
+          return true
+        }
       });
       let numInviteesRemaining = _.size(invitees);
-
-      log.info(`${_.size(self.sponsorsQueue)} in queue - plus found ${numInviteesRemaining} invitees of user ${sponsor.email}`);
 
       if (numInviteesRemaining == 0) {
         resolve(true);
@@ -111,24 +133,47 @@ export class ImportProcessor {
         invitee.sponsor = _.pick(sponsor, ['userId', 'name', 'profilePhotoUrl']);
         invitee.downlineLevel = sponsor.downlineLevel + 1;
         let usersRef = self.db.ref('/importedUsers');
-        let inviteeUserId = usersRef.push().key;
-        usersRef.child(inviteeUserId).set(invitee).then(() => {
-          log.info(`imported user ${invitee.email}`);
-          invitee.userId = inviteeUserId;
-          self.sponsorsQueue.push(invitee);
-          self.numImportedUsers++;
-          numInviteesRemaining--;
-          if (!finalized && numInviteesRemaining == 0) {
-            resolve(true);
-            finalized = true;
-          }
-        }, (error: any) => {
-          numInviteesRemaining--;
-          if (!finalized) {
-            reject(error);
-            finalized = true;
-          }
+        let preexistingUserBasedOnId = _.find(self.preexistingUsers, (u) => {
+          return u.prefineryUser && u.prefineryUser.id == invitee.prefineryUser.id;
         });
+        if (preexistingUserBasedOnId) {
+          log.info(`only updating sponsor info for prefinery user ${invitee.prefineryUser.id } ${invitee.email} because it was previously imported`);
+          usersRef.child(preexistingUserBasedOnId.userId).child('sponsor').set(sponsor).then(() => {
+            numInviteesRemaining--;
+            self.numUsersWithSponsorUpdates++;
+            if (!finalized && numInviteesRemaining == 0) {
+              resolve(true);
+              finalized = true;
+            }
+          }, (error: any) => {
+            numInviteesRemaining--;
+            if (!finalized) {
+              reject(error);
+              finalized = true;
+            }
+          });
+        } else {
+          let inviteeUserId = usersRef.push().key;
+          usersRef.child(inviteeUserId).set(invitee).then(() => {
+            invitee.userId = inviteeUserId;
+            self.sponsorsQueue.push(invitee);
+            self.numUsersImported++;
+            if (self.numUsersImported % 1000 === 0) {
+              log.info(`${self.numUsersImported} imported so far...`);
+            }
+            numInviteesRemaining--;
+            if (!finalized && numInviteesRemaining == 0) {
+              resolve(true);
+              finalized = true;
+            }
+          }, (error: any) => {
+            numInviteesRemaining--;
+            if (!finalized) {
+              reject(error);
+              finalized = true;
+            }
+          });
+        }
       });
     });
   }
@@ -147,12 +192,13 @@ export class ImportProcessor {
             "lastName" : lastName,
             "name" : `${firstName} ${lastName}`,
             "email" : prefineryUser.email,
-            "prefineryUser" : prefineryUser
+            "prefineryUser" : prefineryUser,
+            "createdAt" : firebase.database.ServerValue.TIMESTAMP
           };
           user.prefineryUser.id = user.prefineryUser.id || user.prefineryUser.Id;
           delete user.prefineryUser.Id;
           user.profilePhotoUrl = self.generateProfilePhotoUrl(user);
-          self.newUsers.push(user);
+          self.candidateUsers.push(user);
         });
         resolve();
       });
