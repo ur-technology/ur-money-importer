@@ -7,22 +7,9 @@ import * as log from 'loglevel';
 export class ImportProcessor {
   env: any;
   db: any;
-  _web3: any;
-  candidateUsers: any[] = [];
-  preexistingUsers: any[] = [];
-  sponsorsQueue: any[];
-  numUsersImported: number = 0;
-  usersWithSponsorUpdates: any[] = [];
-  numUsersNotInDownline: number = 0;
-
-  web3() {
-    if (!this._web3) {
-      let Web3 = require('web3');
-      this._web3 = new Web3();
-      this._web3.setProvider(new this._web3.providers.HttpProvider("http://127.0.0.1:9595"));
-    }
-    return this._web3;
-  }
+  candidates: any[] = [];
+  candidateStatuses: string[] = [];
+  importBatchId: string;
 
   constructor(env: any) {
     this.db = firebase.database();
@@ -32,172 +19,221 @@ export class ImportProcessor {
   start(): Promise<any> {
     return new Promise((resolve, reject) => {
       let self = this;
-      self.buildPrefineryUsers().then(() => {
-        log.info(`num candidateUsers=${_.size(self.candidateUsers)}`);
-        return self.db.ref(`/users`).once("value");
-      }).then((snapshot: firebase.database.DataSnapshot) => {
-        let userMapping = snapshot.val();
-        _.each(userMapping, (user, userId) => {
-          if (user.email) {
-            user.userId = userId;
-            self.preexistingUsers.push(user);
-          }
-        });
-        self.sponsorsQueue = _.clone(self.preexistingUsers);
-
-        let sponsorsWithoutDownlineLevel = _.reject(self.sponsorsQueue, (user) => {return !!user.downlineLevel;});
-        if (_.size(sponsorsWithoutDownlineLevel) > 0) {
-          log.info(`number of sponsorsWithoutDownlineLevel=${_.size(sponsorsWithoutDownlineLevel)}`);
-          _.each(sponsorsWithoutDownlineLevel, (user) => {
-            console.log(user.email);
-          });
-        }
-        return self.processAllSponsors();
+      self.buildCandidates().then(() => {
+        log.info(`num candidates=${_.size(self.candidates)}`);
+        return self.importCandidates();
       }).then(() => {
-        let prefineryIdsOfUsersWithSponsorUpdates = _.map(self.usersWithSponsorUpdates, (u) => { return u.prefineryUser && u.prefineryUser.id; });
-        let usersNotInDownline = _.filter(self.candidateUsers, (u) => {
-          return !u.userId && !_.includes(prefineryIdsOfUsersWithSponsorUpdates, u.prefineryUser.id);
-        });
-        self.numUsersNotInDownline = _.size(usersNotInDownline);
-
-        log.info(`${_.size(self.candidateUsers)} total candidate users considered`);
-        log.info(`${_.size(_.uniq(_.map(self.candidateUsers,'email')))} unique emails`);
-        log.info(`  ${self.numUsersImported} users imported`);
-        log.info(`  ${_.size(self.usersWithSponsorUpdates)} users had their sponsors updated`);
-        log.info(`  ${self.numUsersNotInDownline} users not in downline`);
-        let discrepancies = _.size(self.candidateUsers) - ( self.numUsersImported + _.size(self.usersWithSponsorUpdates) + self.numUsersNotInDownline);
-        if (discrepancies === 0) {
-          log.info(`  no discrepancies`);
-        } else {
-          log.info(`  ${discrepancies} discrepancies`);
-        }
+        self.showStats();
         resolve();
       }, (error: any) => {
+        self.showStats();
         reject(error);
       });
     });
   }
 
-  processAllSponsors(): Promise<any> {
+  private showStats() {
+    this.showStat('considered');
+    this.showStat('imported');
+    this.showStat('skipped-for-being-a-duplicate');
+    this.showStat('sponsor-updated');
+    this.showStat('skipped-for-missing-sponsor');
+    this.showStat('unprocessed');
+  }
+
+  private showStat(targetStatus: string) {
+    let count = _.size(_.filter(this.candidateStatuses, (status, userId) => {
+      return status === targetStatus || targetStatus === 'considered';
+    }));
+    log.info(`${count} candidates ${targetStatus}`);
+  }
+
+  private importCandidate(candidate: any, index: number): Promise<any> {
     let self = this;
     return new Promise((resolve, reject) => {
-      self.processFirstSponsor().then((moreInQueue: boolean) => {
-        if (!moreInQueue) {
-          resolve();
-          return;
-        }
-        return self.processAllSponsors();
-      }).then(() => {
-        resolve();
-      }, (error: any) => {
-        reject(error);
-      });
-    });
-  }
 
-  processFirstSponsor(): Promise<any> {
-    return new Promise((resolve, reject) => {
-      let self = this;
-
-      let sponsor = self.sponsorsQueue.shift();
-      if (!sponsor) {
-        resolve(false);
+      if (_.isEmpty(candidate.email || '')) {
+        reject(`got blank email`);
         return;
       }
 
-      let invitees = _.filter(self.candidateUsers, (u) => {
-        return sponsor.email === u.prefineryUser.sponsorEmail;
-      });
-      invitees = _.filter(invitees, (u) => {
-        if (u.userId) {
-          log.info(`skipping prefinery user ${u.prefineryUser.id} ${u.email} because he was already imported in this batch`);
-          return false;
-        } else {
-          return true
-        }
-      });
-      let numInviteesRemaining = _.size(invitees);
+      let sponsorEmail = candidate.prefineryUser.referredBy2 || candidate.prefineryUser.referredBy;
+      if (_.isEmpty(sponsorEmail || '')) {
+        reject(`got blank sponsor email`);
+        return;
+      }
 
-      if (numInviteesRemaining == 0) {
-        resolve(true);
+      let sponsorSearchRef = self.db.ref(`/users`).orderByChild('email').equalTo(sponsorEmail);
+      sponsorSearchRef.once('value').then((snapshot: firebase.database.DataSnapshot) => {
+        if (!snapshot.exists()) {
+          log.info(`skipping candidate ${candidate.email} because sponsor email ${sponsorEmail} not found`);
+          self.candidateStatuses[index] = 'skipped-for-missing-sponsor';
+          resolve(false);
+          return;
+        }
+
+        let val: any = snapshot.val();
+        let sponsor: any = _.values(val)[0];
+        let sponsorUserId: string = _.keys(val)[0];
+
+        let sponsorInfo: any = {
+          userId: sponsorUserId,
+          name: sponsor.name,
+          profilePhotoUrl: sponsor.profilePhotoUrl,
+          announcementTransactionConfirmed: !!sponsor.wallet &&
+            !!sponsor.wallet.announcementTransaction &&
+            !!sponsor.wallet.announcementTransaction.blockNumber &&
+            !!sponsor.wallet.announcementTransaction.hash
+        };
+        sponsorInfo = _.omit(sponsorInfo, _.isNil);
+
+        let preexistingUserSearchRef = self.db.ref(`/users`).orderByChild('email').equalTo(candidate.email);
+        preexistingUserSearchRef.once('value').then((snapshot: firebase.database.DataSnapshot) => {
+          if (snapshot.exists()) {
+            let val: any = snapshot.val();
+            let preexistingUser: any = _.values(val)[0];
+            let preexistingUserId: string = _.keys(val)[0];
+
+            if (preexistingUser.sponsor.userId === sponsorUserId) {
+              log.info(`${ index}: found preexisting user ${preexistingUserId}/${preexistingUser.email} with matching email and matching sponsor ${sponsorUserId}/${sponsor.email} -- skipping`);
+              self.candidateStatuses[index] = 'skipped-for-being-a-duplicate';
+              resolve(true);
+              return;
+            }
+
+            log.info(`${ index}: found preexisting user ${preexistingUserId} with matching email ${preexistingUser.email} and sponsor ${preexistingUser.sponsor.name} will update sponsor info`);
+
+            // update the sponsor of the preexisting user
+            self.db.ref(`/users/${preexistingUserId}/sponsor`).set(sponsorInfo).then(() => {
+              // remove preexisting user from downline users of old sponsor
+              let oldSponsorRef = self.db.ref(`/users/${preexistingUser.sponsor.userId}`);
+              return oldSponsorRef.child(`downlineUsers/${preexistingUserId}`).remove();
+            }).then(() => {
+              // add preexisting user to downline users of new sponsor
+              let newSponsorRef = self.db.ref(`/users/${sponsorUserId}`);
+              return newSponsorRef.child(`downlineUsers/${preexistingUserId}`).set({
+                name: preexistingUser.name,
+                profilePhotoUrl: preexistingUser.profilePhotoUrl
+              });
+            }).then(() => {
+              self.candidateStatuses[index] = 'sponsor-updated';
+              resolve(true);
+            }, (error: any) => {
+              reject(error);
+            });
+          } else {
+            // add candidate to /users collection
+            candidate.sponsor = sponsorInfo;
+            let candidateUserId: string = self.db.ref(`/users`).push().key;
+            self.db.ref(`/users/${candidateUserId}`).set(candidate).then(() => {
+              // add candidate to sponsor's downline users
+              let sponsorRef = self.db.ref(`/users/${sponsorUserId}`);
+              return sponsorRef.child(`downlineUsers/${candidateUserId}`).set({
+                name: candidate.name,
+                profilePhotoUrl: candidate.profilePhotoUrl
+              });
+            }).then(() => {
+              self.candidateStatuses[index] = 'imported';
+              resolve(true);
+            }, (error: any) => {
+              reject(error)
+            });
+          }
+        }, (error: any) => {
+          reject(error)
+        });
+      }, (error: any) => {
+        reject(error)
+      });
+    });
+  }
+
+  private importCandidates(): Promise<any> {
+    let self = this;
+    return new Promise((resolve, reject) => {
+
+      let numRecordsRemaining = _.size(self.candidates);
+      if (numRecordsRemaining === 0) {
+        resolve();
         return;
       }
 
       let finalized = false;
-      _.each(invitees, (invitee) => {
-        invitee.sponsor = _.pick(sponsor, ['userId', 'name', 'profilePhotoUrl']);
-        invitee.downlineLevel = sponsor.downlineLevel + 1;
-        let usersRef = self.db.ref('/users');
-        let preexistingUserBasedOnId = _.find(self.preexistingUsers, (u) => {
-          return u.prefineryUser && u.prefineryUser.id == invitee.prefineryUser.id;
+      _.each(self.candidates, (candidate, index) => {
+        self.importCandidate(candidate, index).then((imported) => {
+          numRecordsRemaining--;
+          if (!finalized && numRecordsRemaining == 0) {
+            finalized = true;
+            resolve();
+          }
+        }, (error) => {
+          if (!finalized) {
+            finalized = true;
+            reject(error);
+          }
         });
-        if (preexistingUserBasedOnId) {
-          log.info(`only updating sponsor info for prefinery user ${invitee.prefineryUser.id } ${invitee.email} because it was previously imported`);
-          usersRef.child(preexistingUserBasedOnId.userId).child('sponsor').set(sponsor).then(() => {
-            numInviteesRemaining--;
-            self.usersWithSponsorUpdates.push(invitee);
-            if (!finalized && numInviteesRemaining == 0) {
-              resolve(true);
-              finalized = true;
-            }
-          }, (error: any) => {
-            numInviteesRemaining--;
-            if (!finalized) {
-              reject(error);
-              finalized = true;
-            }
-          });
-        } else {
-          let inviteeUserId = usersRef.push().key;
-          usersRef.child(inviteeUserId).set(invitee).then(() => {
-            invitee.userId = inviteeUserId;
-            self.sponsorsQueue.push(invitee);
-            self.numUsersImported++;
-            if (self.numUsersImported % 1000 === 0) {
-              log.info(`${self.numUsersImported} imported so far...`);
-            }
-            numInviteesRemaining--;
-            if (!finalized && numInviteesRemaining == 0) {
-              resolve(true);
-              finalized = true;
-            }
-          }, (error: any) => {
-            numInviteesRemaining--;
-            if (!finalized) {
-              reject(error);
-              finalized = true;
-            }
-          });
-        }
+
       });
     });
   }
 
-  buildPrefineryUsers(): Promise<any> {
+  buildCandidates(): Promise<any> {
     let self = this;
     return new Promise((resolve, reject) => {
-      self.db.ref(`/prefineryData`).once("value", (snapshot: firebase.database.DataSnapshot) => {
-        let prefineryUsers: any = snapshot.val();
-        _.each(prefineryUsers, (prefineryUser, importIndex) => {
-          prefineryUser.importIndex = importIndex;
-          let firstName = _.startCase(_.toLower(prefineryUser.firstName));
-          let lastName = _.startCase(_.toLower(prefineryUser.lastName));
-          let user: any = {
-            "firstName" : firstName,
-            "lastName" : lastName,
-            "name" : `${firstName} ${lastName}`,
-            "email" : prefineryUser.email,
-            "prefineryUser" : prefineryUser,
-            "createdAt" : firebase.database.ServerValue.TIMESTAMP
-          };
-          user.prefineryUser.id = user.prefineryUser.id || user.prefineryUser.Id;
-          delete user.prefineryUser.Id;
-          user.profilePhotoUrl = self.generateProfilePhotoUrl(user);
-          self.candidateUsers.push(user);
+
+      self.importBatchId = self.db.ref("/users").push().key;
+      let fs = require('fs');
+      let parse = require('csv-parse');
+
+      let rs = fs.createReadStream('import.csv');
+      rs.pipe(parse({delimiter: ','})).on('data', (csvrow: string[]) => {
+        if (csvrow[0] === 'id') {
+          return;
+        }
+        _.each(csvrow, (field, index) => {
+          csvrow[index] = _.trim(field);
         });
+        self.buildCandidate({
+          id: csvrow[0],
+          email: csvrow[1],
+          firstName: csvrow[2],
+          lastName: csvrow[3],
+          name: csvrow[4],
+          country: csvrow[5],
+          phone: csvrow[6],
+          joinedAt: csvrow[7],
+          ipAddress: csvrow[8],
+          referralLink: csvrow[9],
+          referredBy: csvrow[10],
+          httpReferrer: csvrow[11],
+          userReportedCountry: csvrow[12],
+          userReportedReferrer: csvrow[13],
+          referredBy2: csvrow[14]
+        });
+      }).on('end',function() {
+        log.info(`${self.candidates.length} records read from file`);
         resolve();
       });
     });
+  }
+
+  buildCandidate(prefineryUser: any) {
+    prefineryUser.importBatchId = this.importBatchId;
+    prefineryUser.importIndex = this.candidates.length;
+
+    let firstName = _.startCase(_.toLower(prefineryUser.firstName));
+    let lastName = _.startCase(_.toLower(prefineryUser.lastName));
+    let candidateUser: any = {
+      "firstName" : firstName,
+      "lastName" : lastName,
+      "name" : `${firstName} ${lastName}`,
+      "email" : prefineryUser.email,
+      "prefineryUser" : prefineryUser,
+      "createdAt" : firebase.database.ServerValue.TIMESTAMP
+    };
+    candidateUser.profilePhotoUrl = this.generateProfilePhotoUrl(candidateUser);
+    this.candidates.push(candidateUser);
+    this.candidateStatuses.push('unprocessed');
   }
 
   shutdown(): Promise<any> {
