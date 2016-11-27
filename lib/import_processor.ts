@@ -10,6 +10,9 @@ export class ImportProcessor {
   candidates: any[] = [];
   candidateStatuses: string[] = [];
   importBatchId: string;
+  sponsorUserIdsQueue: any[] = [];
+  existingUsers: any[];
+  numUsersProcessed: number = 0;
 
   constructor(env: any) {
     this.db = firebase.database();
@@ -17,6 +20,288 @@ export class ImportProcessor {
   }
 
   start(): Promise<any> {
+    return new Promise((resolve, reject) => {
+      let self = this;
+      let usersSearch = self.db.ref(`/users`).orderByChild('email');
+      usersSearch.once('value').then((snapshot: firebase.database.DataSnapshot) => {
+        self.existingUsers = snapshot.val();
+        log.info(`retrieved ${_.size(self.existingUsers)} users from db`);
+        _.each(self.existingUsers, (u,uid) => {
+          u.userId = uid;
+        });
+        return self.checkForCircularRefs();
+      }).then(() => {
+        return self.correctSponsorInfoForAllUsersInQueue(true);
+      }).then(() => {
+        resolve();
+      }, (error: any) => {
+        reject(error);
+      });
+    });
+  }
+
+  correctSponsorInfoForAllUsersInQueue(firstTime?: boolean): Promise<any> {
+    return new Promise((resolve, reject) => {
+      let self = this;
+
+      if (firstTime) {
+        let startingUser = _.find(self.existingUsers, (u: any, uid: string) => {
+          return u.email === 'jreitano@ur.technology';
+        });
+        self.sponsorUserIdsQueue.push(startingUser.userId);
+        _.each(self.existingUsers, (u,uid) => {
+          u.processed = false;
+        });
+      }
+
+      if (_.isEmpty(self.sponsorUserIdsQueue)) {
+        resolve();
+        return;
+      }
+
+      self.correctSponsorInfoForFirstUserInQueue().then(() => {
+        return self.correctSponsorInfoForAllUsersInQueue();
+      }).then(() => {
+        if (firstTime) {
+          let missedUsers = _.reject(self.existingUsers, 'processed');
+          log.info('missed users', missedUsers);
+        }
+        resolve();
+      }, (error: any) => {
+        reject(error);
+      });
+    });
+  }
+
+  correctSponsorInfoForFirstUserInQueue(): Promise<any> {
+    return new Promise((resolve, reject) => {
+      let self = this;
+
+      let sponsorUserId = self.sponsorUserIdsQueue.shift();
+      let sponsor = self.existingUsers[sponsorUserId];
+      if (sponsor.processed) {
+        reject('unexpectedly processed 1');
+        return;
+      }
+
+      let directReferrals = _.filter(self.existingUsers, (u: any, uid: string) => {
+        return u.sponsor && u.sponsor.userId === sponsor.userId;
+      });
+
+      let numRecordsLeft: number = _.size(directReferrals);
+      let finalized = false;
+
+      function resolveIfNecessary() {
+        if (!finalized && numRecordsLeft === 0) {
+
+          if (sponsor.processed) {
+            reject('unexpectedly processed 2');
+            return;
+          }
+          sponsor.processed = true;
+          self.numUsersProcessed++;
+          if (self.numUsersProcessed % 1000 === 0) {
+            log.info(`numUsersProcessed=${self.numUsersProcessed}`)
+          }
+
+          finalized = true;
+          resolve();
+        }
+      }
+
+      let downlineUsers: any = {};
+      _.each(directReferrals, (user: any) => {
+        downlineUsers[user.userId] = _.omit(_.pick(user, ['name', 'profilePhotoUrl']),_.isNil);
+      });
+      let p: any;
+      if (_.isEmpty(downlineUsers)) {
+        p = self.db.ref(`/users/${sponsorUserId}/downlineUsers`).remove();
+      } else {
+        p = self.db.ref(`/users/${sponsorUserId}/downlineUsers`).set(downlineUsers);
+      }
+      p.then(() => {
+        resolveIfNecessary();
+        _.each(directReferrals, (user: any) => {
+          self.db.ref(`/users/${user.userId}`).update({downlineLevel: sponsor.downlineLevel + 1}).then(() => {
+            return self.db.ref(`/users/${user.userId}/sponsor`).update({
+              name: sponsor.name,
+              profilePhotoUrl: sponsor.profilePhotoUrl,
+              announcementTransactionConfirmed: !!sponsor.wallet &&
+                !!sponsor.wallet.announcementTransaction &&
+                !!sponsor.wallet.announcementTransaction.blockNumber &&
+                !!sponsor.wallet.announcementTransaction.hash
+            });
+          }).then(() => {
+            self.sponsorUserIdsQueue.push(user.userId);
+            numRecordsLeft--;
+            resolveIfNecessary();
+          }, (error: any) => {
+            if (!finalized) {
+              finalized = true;
+              reject(error);
+            }
+          });
+        });
+      });
+    });
+  }
+
+  checkForCircularRefs(): Promise<any> {
+    return new Promise((resolve, reject) => {
+      let self = this;
+
+      // first make sure all users descended from jreitano@ur.technology and sponsor user id is set correctly
+      let malformedUsers = _.filter(self.existingUsers, (user: any, userId: string) => {
+        if (user.email === 'jreitano@ur.technology') {
+          return false;
+        } else if (!user.sponsor || !user.sponsor.userId) {
+          return true;
+        } else if (userId === user.sponsor.userId) {
+          return true;
+        } else if (!self.existingUsers[user.sponsor.userId]) {
+          return true;
+        } else {
+          return false
+        }
+      });
+      if (!_.isEmpty(malformedUsers)) {
+        log.info('malformedUsers=', malformedUsers);
+        reject(`found malformedUser ${malformedUsers[0]} with id ${malformedUsers[0].userId}`);
+        return;
+      }
+
+      let numRecordsLeft: number = _.size(self.existingUsers);
+      let circularRefUserIds: any = {};
+      let finalized: boolean = false;
+      _.each(self.existingUsers, (user: any, userId: string) => {
+        user.processed = false;
+        self.checkForCircularRefsByOneUser(user, userId).then(() => {
+          user.processed = true;
+          numRecordsLeft--;
+          if (!finalized && numRecordsLeft === 0) {
+            finalized = true;
+            _.each(circularRefUserIds, (_,uid) => {
+              let url = self.db.ref(`/users/${uid}`).toString();
+              log.info(`circular reference by user ${url}`);
+            });
+            let unprocessedUsers = _.map(_.reject(self.existingUsers, 'processed'),(u) => {return u;});
+            if (!_.isEmpty(unprocessedUsers)) {
+              log.info(`unprocessedUsers=`,unprocessedUsers);
+            }
+            resolve();
+          }
+        }, (error: any) => {
+          if (!finalized) {
+            finalized = true;
+            reject(error);
+          }
+        });
+      });
+    });
+  }
+
+  checkForCircularRefsByOneUser(startingUser: any, startingUserId: string): Promise<any> {
+    return new Promise((resolve, reject) => {
+      let self = this;
+
+      let user = startingUser;
+      let userId = startingUserId;
+      let alreadyEncounteredUserIds: string[] = [];
+
+      while (true) {
+        if (user.email === 'jreitano@ur.technology') {
+          resolve()
+          break;
+        }
+        let alreadyEncounteredUserId = _.find(alreadyEncounteredUserIds, (uid,index) => {
+          return uid === userId;
+        });
+        if (alreadyEncounteredUserId) {
+          reject(`found circular references for user ids ${alreadyEncounteredUserIds}`);
+          break;
+        }
+        alreadyEncounteredUserIds.push(userId);
+        let sponsorId = user.sponsor.userId;
+        user = self.existingUsers[sponsorId];
+        userId = sponsorId;
+      }
+    });
+  }
+
+  checkDownlineLevel(user: any, userId: string): Promise<any> {
+    return new Promise((resolve, reject) => {
+      let self = this;
+
+      let userRef = self.db.ref(`/users/${userId}`);
+      let userPath = userRef.toString();
+
+      if (!user.sponsor || !user.sponsor.userId) {
+        log.info(`user ${userPath} lacks sponsor`);
+        resolve(false);
+        return;
+      }
+
+      let sponsorSearchRef = self.db.ref(`/users/${user.sponsor.userId}`);
+      sponsorSearchRef.once('value').then((snapshot: firebase.database.DataSnapshot) => {
+
+        if (!snapshot.exists()) {
+          log.info(`can't find sponsor ${user.sponsor.userId} for user ${userPath}`);
+          resolve(false);
+          return;
+        }
+
+        let sponsor: any = snapshot.val();
+        let sponsorUserId: string = snapshot.key;
+
+        if (userId === sponsorUserId) {
+          log.info(`user ${userPath} is his own sponsor`);
+          resolve(false);
+          return;
+        }
+
+        if (!_.isNil(user.downlineLevel) && !_.isNumber(user.downlineLevel)) {
+          log.info(`user ${userPath} has non-numeric downline level ${user.downlineLevel}`);
+          resolve(false);
+          return;
+        }
+
+        if (_.isNil(sponsor.downlineLevel)) {
+          log.info(`sponsor ${sponsorSearchRef.toString()} missing downline level`);
+          resolve(false);
+          return;
+        }
+
+        if (sponsor.downlineLevel === 0 || sponsor.downlineLevel === 1) {
+          log.info(`sponsor ${sponsorSearchRef.toString()} has downline level ${sponsor.downlineLevel}`);
+          resolve(false);
+          return;
+        }
+
+        if (!_.isNumber(sponsor.downlineLevel)) {
+          log.info(`sponsor ${sponsorSearchRef.toString()} has non-numeric downline level ${sponsor.downlineLevel}`);
+          resolve(false);
+          return;
+        }
+
+        if (_.isNil(user.downlineLevel)) {
+          userRef.update({downlineLevel: sponsor.downlineLevel + 1}).then(() => {
+            log.info(`updated user ${userPath} with downlineLevel ${sponsor.downlineLevel + 1}`);
+            resolve(true);
+          });
+        } else {
+          if (sponsor.downlineLevel >= user.downlineLevel) {
+            log.info(`sponsor ${sponsorSearchRef.toString()} has greater downline level than user ${userPath}`);
+            resolve(false);
+            return;
+          }
+
+          resolve(true);
+        }
+      });
+    });
+  }
+
+  start2(): Promise<any> {
     return new Promise((resolve, reject) => {
       let self = this;
       self.buildCandidates().then(() => {
@@ -162,7 +447,7 @@ export class ImportProcessor {
       _.each(self.candidates, (candidate, index) => {
         self.importCandidate(candidate, index).then((imported) => {
           numRecordsRemaining--;
-          if (!finalized && numRecordsRemaining == 0) {
+          if (!finalized && numRecordsRemaining === 0) {
             finalized = true;
             resolve();
           }
@@ -286,7 +571,7 @@ export class ImportProcessor {
     let messageName: string = "updated-url";
     self.db.ref("/users").orderByChild("invitedAt").on("child_added", (userSnapshot: firebase.database.DataSnapshot) => {
       let user: any = userSnapshot.val();
-      let alreadySent: boolean = _.some(user.smsMessages, (message: any, messageId: string) => { return message.name == messageName; });
+      let alreadySent: boolean = _.some(user.smsMessages, (message: any, messageId: string) => { return message.name === messageName; });
       if (alreadySent) {
         return;
       }
@@ -454,9 +739,9 @@ export class ImportProcessor {
   private containsUndefinedValue(objectOrArray: any): boolean {
     return _.some(objectOrArray, (value, key) => {
       let type = typeof (value);
-      if (type == 'undefined') {
+      if (type === 'undefined') {
         return true;
-      } else if (type == 'object') {
+      } else if (type === 'object') {
         return this.containsUndefinedValue(value);
       } else {
         return false;
