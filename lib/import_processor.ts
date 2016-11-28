@@ -11,33 +11,129 @@ export class ImportProcessor {
   candidateStatuses: string[] = [];
   importBatchId: string;
   sponsorUserIdsQueue: any[] = [];
-  existingUsers: any[];
-  numUsersProcessed: number = 0;
+  existingUsers: any;
+  numUsersProcessed: number;
 
   constructor(env: any) {
     this.db = firebase.database();
     this.env = env;
   }
 
-  start(): Promise<any> {
-    return new Promise((resolve, reject) => {
-      let self = this;
-      let usersSearch = self.db.ref(`/users`).orderByChild('email');
-      usersSearch.once('value').then((snapshot: firebase.database.DataSnapshot) => {
-        self.existingUsers = snapshot.val();
-        log.info(`retrieved ${_.size(self.existingUsers)} users from db`);
-        _.each(self.existingUsers, (u,uid) => {
-          u.userId = uid;
-        });
-        return self.checkForCircularRefs();
-      }).then(() => {
-        return self.correctSponsorInfoForAllUsersInQueue(true);
-      }).then(() => {
-        resolve();
-      }, (error: any) => {
-        reject(error);
-      });
+  // start(): Promise<any> {
+  //   return new Promise((resolve, reject) => {
+  //     let self = this;
+  //     let usersSearch = self.db.ref(`/users`).orderByChild('email');
+  //     usersSearch.once('value').then((snapshot: firebase.database.DataSnapshot) => {
+  //       self.existingUsers = snapshot.val();
+  //       log.info(`retrieved ${_.size(self.existingUsers)} users from db`);
+  //       _.each(self.existingUsers, (u,uid) => {
+  //         u.userId = uid;
+  //       });
+  //       self.calculateDownlineSizeForAllUsers();
+  //     //   return self.checkForCircularRefs();
+  //     // }).then(() => {
+  //     //   return self.correctSponsorInfoForAllUsersInQueue(true);
+  //     // }).then(() => {
+  //       resolve();
+  //     }, (error: any) => {
+  //       reject(error);
+  //     });
+  //   });
+  // }
+
+  calculateDownlineSizeForAllUsers() {
+    let self = this;
+    let startingUser = _.find(self.existingUsers, (u: any, uid: string) => {
+      return u.email === 'jreitano@ur.technology';
     });
+    self.numUsersProcessed = 0;
+    self.calculateDownlineSizeForOneUser(startingUser, true);
+
+    let previouslyProcessedUsers: any = self.existingUsers;
+    while (true) {
+      let unprocessedUsers: any = _.filter(previouslyProcessedUsers, (u: any) => {
+        return _.isNil(u.downlineSize);
+      });
+      if (_.isEmpty(unprocessedUsers)) {
+        break;
+      }
+      log.info(`${_.size(unprocessedUsers)} users still unprocessedx`);
+      let user: any = _.sample(unprocessedUsers);
+      self.calculateDownlineSizeForOneUser(user, false);
+      previouslyProcessedUsers = unprocessedUsers;
+    }
+
+    let userIds: string[] = <string[]> _.keys(self.existingUsers);
+    let userIdsSortedByDownlineSize: string[] = <string[]> _.sortBy(userIds, (userId: string) => {
+      let user = self.existingUsers[userId];
+      if (!user) {
+        log.warn(`could not find user for userId ${userId}`);
+        throw `could not find user for userId ${userId}`;
+      }
+      if (_.isNil(user.downlineSize)) {
+        log.warn(`could not find downline size for userId`, user);
+        throw `could not find downline size for userId ${userId}`;
+      }
+      return 1000000 - user.downlineSize;
+    });
+
+    let stringify = require('csv-stringify');
+    let data = <string[][]> _.map(userIdsSortedByDownlineSize, (userId: string) => {
+      let user = self.existingUsers[userId];
+      let prefineryUser: any = user.prefineryUser || user.prefinery || {};
+      return [
+        prefineryUser.id || '',
+        user.email || '',
+        user.firstName || '',
+        user.lastName || '',
+        user.name || '',
+        prefineryUser.country || '',
+        user.phone || prefineryUser.phone || '',
+        prefineryUser.joinedAt || '',
+        prefineryUser.ipAddress || '',
+        prefineryUser.referralLink || '',
+        prefineryUser.referredBy || '',
+        prefineryUser.httpReferrer || '',
+        prefineryUser.userReportedCountry || '',
+        prefineryUser.userReportedReferrer || '',
+        prefineryUser.referredBy2 || prefineryUser.sponsorEmail || '',
+        user.userId || '',
+        '' + user.downlineSize,
+        '' + user.numDirectReferrals,
+      ];
+    });
+    _.each(data, (row) => {
+      let quotedFields = _.map(row, (r) => { return `\"${r}\"`; });
+      log.info(_.join(quotedFields,"\t"));
+    });
+  }
+
+  calculateDownlineSizeForOneUser(user: any, quickSearch: boolean) {
+    let self = this;
+    if (user.downlineSize !== undefined) {
+      return;
+    }
+
+    let directReferrals: any[];
+    if (quickSearch) {
+      directReferrals = _.map(user.downlineUsers, (u: any, uid: string) => {
+       return self.existingUsers[uid];
+     });
+    } else {
+      directReferrals = _.filter(self.existingUsers, (u: any, uid: string) => {
+         return u.sponsor && u.sponsor.userId == user.userId;
+      });
+    }
+    user.numDirectReferrals = directReferrals.length;
+    user.downlineSize = user.numDirectReferrals;
+    _.each(directReferrals, (referralUser,referralUserId) => {
+      self.calculateDownlineSizeForOneUser(referralUser, quickSearch);
+      user.downlineSize = user.downlineSize + referralUser.downlineSize;
+    });
+    if (user.downlineSize > 1000) {
+      log.info(`user ${user.userId} has downline size of ${user.downlineSize}`);
+    }
+    self.numUsersProcessed++;
   }
 
   correctSponsorInfoForAllUsersInQueue(firstTime?: boolean): Promise<any> {
@@ -52,6 +148,7 @@ export class ImportProcessor {
         _.each(self.existingUsers, (u,uid) => {
           u.processed = false;
         });
+        self.numUsersProcessed = 0;
       }
 
       if (_.isEmpty(self.sponsorUserIdsQueue)) {
@@ -91,7 +188,7 @@ export class ImportProcessor {
       let numRecordsLeft: number = _.size(directReferrals);
       let finalized = false;
 
-      function resolveIfNecessary() {
+      function resolveIfDoneWithDirectReferrals() {
         if (!finalized && numRecordsLeft === 0) {
 
           if (sponsor.processed) {
@@ -109,18 +206,18 @@ export class ImportProcessor {
         }
       }
 
-      let downlineUsers: any = {};
-      _.each(directReferrals, (user: any) => {
-        downlineUsers[user.userId] = _.omit(_.pick(user, ['name', 'profilePhotoUrl']),_.isNil);
-      });
-      let p: any;
-      if (_.isEmpty(downlineUsers)) {
-        p = self.db.ref(`/users/${sponsorUserId}/downlineUsers`).remove();
-      } else {
-        p = self.db.ref(`/users/${sponsorUserId}/downlineUsers`).set(downlineUsers);
-      }
-      p.then(() => {
-        resolveIfNecessary();
+      self.db.ref(`/users/${sponsorUserId}/disabled`).remove().then(() => {
+        let downlineUsers: any = {};
+        _.each(directReferrals, (user: any) => {
+          downlineUsers[user.userId] = _.omit(_.pick(user, ['name', 'profilePhotoUrl']),_.isNil);
+        });
+        if (_.isEmpty(downlineUsers)) {
+          return self.db.ref(`/users/${sponsorUserId}/downlineUsers`).remove();
+        } else {
+          return self.db.ref(`/users/${sponsorUserId}/downlineUsers`).set(downlineUsers);
+        }
+      }).then(() => {
+        resolveIfDoneWithDirectReferrals();
         _.each(directReferrals, (user: any) => {
           self.db.ref(`/users/${user.userId}`).update({downlineLevel: sponsor.downlineLevel + 1}).then(() => {
             return self.db.ref(`/users/${user.userId}/sponsor`).update({
@@ -134,7 +231,7 @@ export class ImportProcessor {
           }).then(() => {
             self.sponsorUserIdsQueue.push(user.userId);
             numRecordsLeft--;
-            resolveIfNecessary();
+            resolveIfDoneWithDirectReferrals();
           }, (error: any) => {
             if (!finalized) {
               finalized = true;
@@ -301,7 +398,7 @@ export class ImportProcessor {
     });
   }
 
-  start2(): Promise<any> {
+  start(): Promise<any> {
     return new Promise((resolve, reject) => {
       let self = this;
       self.buildCandidates().then(() => {
