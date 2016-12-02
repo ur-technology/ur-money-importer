@@ -27,18 +27,30 @@ let userRef = (id) => {
   return usersRef().child(id);
 };
 
-
-
 let users;
+
+let vipEmails = ['k.fingal@gmail.com', 'bugmenot134@yahoo.com', 'mikepola3@gmail.com', 'barbarahagood1@gmail.com', 'courtneydanne@gmail.com', 'schroder.jordanb@gmail.com', 'grahamj412@gmail.com', 'jenniferlovesjamie@comcast.net', 'viviana.schaller@outlook.de', 'moh.rokib.94.mr@gmail.com', 'lulasmom617@gmail.com', 'santiagoenriqueescobedo@gmail.com', 'nimblues@gmail.com', 'mamadmomod238@gmail.com', 'tripp@chamblin.com', 'nacnaus2@gmail.com', 'mcrawford@rymanhp.com', 'adam@sobrolaw.com', 'stever@equitas-intl.com', 'wtwebb2@comcast.net', 'clement.webb@gmail.com', 'holybloood89@gmail.ua', 'flynn.mcrae21@montgomerybell.edu', 'herofrog243@gmail.com', 'mcdugaldj@gmail.com', 'max.d.giorgio@gmail.com', 'wrenkis@me.com', 'truettmckeehan@gmail.com', 'howardeglover@gmail.com', 'btcman007@gmail.com', 'slimane.bouaoud1@gmail.com', 'jannejac@gmail.com', 'thomasmcdaniel9@gmail.com', 'karin.kristiansson62@gmail.com', 'mats.betterglobe@gmail.com', 'ggtupe@yahoo.com', 'ternovicnews@gmail.com', 'vladeo1x@gmail.com', 'iqball26@hotmail.com'];
+let vips = _.map(vipEmails, (e) => { return _.find(users, (u) => { return u.email === e; }) });
+let groups = _.groupBy(vips, (u) => {
+  if (!u.wallet || !u.wallet.address) {
+    return "never-logged-in";
+  } else {
+    return ( u.registration && u.registration.status ) || 'created-wallet';
+  }
+});
+let groups2 = _.mapValues(groups, (g, status) => { let m = {}; _.each(g, (u) => { m[u.email] = u; }); return m; });
+
 
 usersRef().once('value', (snapshot) => {
   users = snapshot.val() || {};
   _.each(users, (u,uid) => { u.userId = uid; });
   log.info(`${_.size(users)} users loaded`);
+});
+
   let recordsProcessed = 0;
   let recordsUpdated = 0;
 
-  setNewDownlineLevel = (s) => {
+  let setNewDownlineLevel = (s) => {
     recordsProcessed++;
     let newDownlineLevel = s.downlineLevel + 1;
     _.each(s.downlineUsers,(_,duid) => {

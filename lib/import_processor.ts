@@ -45,7 +45,7 @@ export class ImportProcessor {
 
   private showStats() {
     _.each(_.groupBy(this.candidates, 'importStatus'), (group, importStatus) => {
-      log.info(`${_.size(group)} candidates ${importStatus}`);
+      log.info(`  ${_.size(group)} candidates ${importStatus}`);
       if (importStatus === 'skipped-for-sponsor-email-lookup-failure') {
         let uniqueSponsorEmails = _.uniq(_.map(group, (c: any) => { return c.prefineryUser && c.prefineryUser.referredBy; }));
         log.info(`  with ${_.size(uniqueSponsorEmails)} unique sponsor emails`, uniqueSponsorEmails);
@@ -125,7 +125,6 @@ export class ImportProcessor {
     let self = this;
     return new Promise((resolve, reject) => {
       self.importRound++;
-      log.info(`starting round ${self.importRound} of imports...`);
 
       let numCandidates = _.size(self.candidates);
       let randomCandidate = _.sample(self.candidates);
@@ -136,14 +135,22 @@ export class ImportProcessor {
         return;
       }
 
+      log.info(`  starting round ${self.importRound} of imports...`);
       let finalized = false;
       _.each(unprocessedCandidates, (candidate) => {
         self.importCandidate(candidate).then((imported) => {
           numRecordsRemaining--;
           if (!finalized && numRecordsRemaining === 0) {
-            finalized = true;
             self.importUnprocessedCandidates().then(() => {
-              resolve();
+              if (!finalized) {
+                finalized = true;
+                resolve();
+              }
+            }, (error) => {
+              if (!finalized) {
+                finalized = true;
+                reject(error);
+              }
             });
           }
         }, (error) => {
@@ -164,45 +171,67 @@ export class ImportProcessor {
 
     return new Promise((resolve, reject) => {
       var request = require('request');
-      let options = {
-        url: `https://api.prefinery.com/api/v2/betas/9505/testers.json?api_key=dypeGz4qErzRuN143ZVN2fk2SagFqKPN&page=${startPage}`,
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json' },
-        body: {},
-        json: true
-      };
-      try {
-        log.info(`requesting page ${startPage} of testers from prefinery...`);
-        request(options, (error: any, response: any, prefineryUsers: any) => {
-          if (error) {
-            reject(`error retrieving data from the prefinery api: ${error}`);
-            return;
-          }
+      let finalized: boolean = false;
+      let GROUP_SIZE = 1;
+      let numPagesRemaining = GROUP_SIZE;
+      let emptyPageEncountered = false;
 
-          if (_.isEmpty(prefineryUsers)) {
-            resolve();
-            return;
+      log.info(`requesting pages ${startPage} through ${startPage + GROUP_SIZE - 1} of testers from prefinery...`);
+      for (let index = 0; index < GROUP_SIZE; index++) {
+        let page = startPage + index;
+        try {
+          let options = {
+            url: `https://api.prefinery.com/api/v2/betas/9505/testers.json?api_key=dypeGz4qErzRuN143ZVN2fk2SagFqKPN&page=${page}`,
+            method: 'GET',
+            headers: { 'Content-Type': 'application/json' },
+            body: {},
+            json: true
           };
-
-          _.each(prefineryUsers, (prefineryUser: any, index: number) => {
-            if (prefineryUser.status === 'active') {
-              let candidate: any = self.buildCandidate(prefineryUser);
-              self.candidates[candidate.userId] = candidate;
+          request(options, (error: any, response: any, prefineryUsers: any) => {
+            if (finalized) {
+              return;
             }
-          });
+            if (error) {
+              finalized = true;
+              reject(`error retrieving data from the prefinery api: ${error}`);
+              return;
+            }
+            _.each(prefineryUsers, (prefineryUser: any, index: number) => {
+              if (prefineryUser.status === 'active') {
+                let candidate: any = self.buildCandidate(prefineryUser);
+                self.candidates[candidate.userId] = candidate;
+              }
+            });
+            if (_.isEmpty(prefineryUsers)) {
+              emptyPageEncountered = true;
+            }
+            numPagesRemaining--;
+            if (numPagesRemaining === 0) {
+              self.importRound = 0;
+              self.importUnprocessedCandidates().then(() => {
+                self.showStats();
+                if (emptyPageEncountered) {
+                  return Promise.resolve(undefined);
+                } else {
+                  return self.loadCandidatesFromPrefinery(startPage + GROUP_SIZE);
+                }
+              }).then(() => {
+                if (!finalized) {
+                  finalized = true;
+                  resolve();
+                }
+              }, (error) => {
+                reject(error);
+              });
+            }
 
-          self.importRound = 0;
-          self.importUnprocessedCandidates().then(() => {
-            self.showStats();
-            return self.loadCandidatesFromPrefinery(startPage + 1);
-          }).then(() => {
-            resolve();
-          }, (error) => {
-            reject(error);
           });
-        });
-      } catch(error) {
-        reject(`got error when attempting to get data from prefinery: ${error}`);
+        } catch(error) {
+          if (!finalized) {
+            finalized = true;
+            reject(`got error when attempting to get data from prefinery: ${error}`);
+          }
+        }
       }
     });
   }
