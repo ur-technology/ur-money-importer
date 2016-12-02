@@ -44,12 +44,14 @@ export class ImportProcessor {
   }
 
   private showStats() {
+    log.info(`  ${_.size(this.candidates)} total candidates processed`);
     _.each(_.groupBy(this.candidates, 'importStatus'), (group, importStatus) => {
-      log.info(`  ${_.size(group)} candidates ${importStatus}`);
+      let suffix = '';
       if (importStatus === 'skipped-for-sponsor-email-lookup-failure') {
-        let uniqueSponsorEmails = _.uniq(_.map(group, (c: any) => { return c.prefineryUser && c.prefineryUser.referredBy; }));
-        log.info(`  with ${_.size(uniqueSponsorEmails)} unique sponsor emails`, uniqueSponsorEmails);
+        let count = _.size(_.uniq(_.map(group, (c: any) => { return c.prefineryUser && c.prefineryUser.referredBy; })));
+        suffix = `(${count} unique sponsor emails)`;
       }
+      log.info(`    ${_.size(group)} candidates ${importStatus} ${suffix}`);
     });
   }
 
@@ -111,7 +113,7 @@ export class ImportProcessor {
         self.existingUsers[candidate.userId] = candidate;
         _.each(self.candidates, (c) => {
           if (c.importStatus === 'skipped-for-sponsor-email-lookup-failure' && c.prefineryUser && c.prefineryUser.referredBy === candidate.email) {
-            candidate.importStatus = 'unprocessed';
+            c.importStatus = 'unprocessed';
           }
         });
         resolve(true);
@@ -256,7 +258,7 @@ export class ImportProcessor {
     let candidate: any = {
       "firstName" : _.startCase(_.toLower(prefineryUser.profile.first_name)),
       "lastName" : _.startCase(_.toLower(prefineryUser.profile.last_name)),
-      "email" : prefineryUser.email,
+      "email" : _.toLower(_.trim(prefineryUser.email || '')),
       "prefineryUser" : processedPrefineryUser,
       "createdAt" : firebase.database.ServerValue.TIMESTAMP
     };
