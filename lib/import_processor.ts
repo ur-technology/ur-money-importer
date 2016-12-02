@@ -7,12 +7,13 @@ import * as log from 'loglevel';
 export class ImportProcessor {
   env: any;
   db: any;
-  candidates: any[] = [];
-  candidateStatuses: string[] = [];
   importBatchId: string;
   sponsorUserIdsQueue: any[] = [];
   existingUsers: any;
+  candidates: any;
   numUsersProcessed: number;
+  importRound: number;
+  doneLoading: boolean;
 
   constructor(env: any) {
     this.db = firebase.database();
@@ -22,12 +23,23 @@ export class ImportProcessor {
   start(): Promise<any> {
     return new Promise((resolve, reject) => {
       let self = this;
-      self.getPrefineryData().then(() => {
-        log.info(`num candidates=${_.size(self.candidates)}`);
-        return self.importCandidates();
-      }).then(() => {
-        self.showStats();
-        resolve();
+
+      self.doneLoading = false;
+
+      self.db.ref('/users').once('value', (snapshot: firebase.database.DataSnapshot) => {
+        self.existingUsers = snapshot.val() || {};
+        _.each(self.existingUsers, (u,uid) => { u.userId = uid; });
+        log.info(`${_.size(self.existingUsers)} preexisting users loaded`);
+        self.importCandidatesUntilDone().then(() => {
+          self.showStats();
+          resolve();
+        });
+        self.loadAllCandidatesFromPrefinery().then(() => {
+          self.doneLoading = true;
+        }, (error: any) => {
+          self.showStats();
+          reject(error);
+        });
       }, (error: any) => {
         self.showStats();
         reject(error);
@@ -36,105 +48,110 @@ export class ImportProcessor {
   }
 
   private showStats() {
-    this.showStat('considered');
-    this.showStat('imported');
-    this.showStat('skipped-for-being-a-duplicate');
-    this.showStat('skipped-for-missing-sponsor');
-    this.showStat('unprocessed');
+    _.each(_.groupBy(this.candidates, 'importStatus'), (group, importStatus) => {
+      log.info(`${_.size(group)} candidates ${importStatus}`);
+    });
   }
 
-  private showStat(targetStatus: string) {
-    let count = _.size(_.filter(this.candidateStatuses, (status, userId) => {
-      return status === targetStatus || targetStatus === 'considered';
-    }));
-    log.info(`${count} candidates ${targetStatus}`);
-  }
-
-  private importCandidate(candidate: any, index: number): Promise<any> {
+  private importCandidate(candidate: any): Promise<any> {
     let self = this;
     return new Promise((resolve, reject) => {
 
-      if (_.isEmpty(candidate.email || '')) {
-        reject(`got blank email`);
+      if (_.isEmpty(_.trim(candidate.email || ''))) {
+        candidate.importStatus = 'skipped-for-missing-sponsor-email';
+        resolve(false);
         return;
       }
 
-      let sponsorEmail: string = candidate.prefineryUser.email || 'eiland@ur.technology';
-      let sponsorUserId: string;
-      let candidateUserId: string = self.db.ref(`/users`).push().key;
+      if (_.some(self.existingUsers, (u: any) => { return u.email === candidate.email })) {
+        candidate.importStatus = 'skipped-for-duplicate-email';
+        resolve(false);
+        return;
+      }
 
-      self.db.ref(`/users`).orderByChild('email').equalTo(candidate.email).once('value').then((snapshot: firebase.database.DataSnapshot) => {
-        if (snapshot.exists()) {
-          return Promise.reject('skipped-for-duplicate-email');
-        }
-        return self.db.ref(`/users`).orderByChild('prefineryUser/id').equalTo(candidate.prefineryUser.id).once('value');
-      }).then((snapshot: firebase.database.DataSnapshot) => {
-        if (snapshot.exists()) {
-          return Promise.reject('skipped-for-duplicate-prefinery-id');
-        }
-        return self.db.ref(`/users`).orderByChild('email').equalTo(sponsorEmail).once('value');
-      }).then((snapshot: firebase.database.DataSnapshot) => {
-        if (!snapshot.exists()) {
-          log.info(`skipping candidate ${candidate.email} because sponsor email ${sponsorEmail} not found`);
-          return Promise.reject('skipped-for-missing-sponsor');
-        }
-        let val: any = snapshot.val();
-        let sponsor: any = _.values(val)[0];
-        sponsorUserId = _.keys(val)[0];
+      if (_.some(self.existingUsers, (u: any) => { return u.prefineryUser && candidate.prefineryUser && u.prefineryUser.id === candidate.prefineryUser.id; })) {
+        candidate.importStatus = 'skipped-for-duplicate-prefinery-id';
+        resolve(false);
+        return;
+      }
 
-        candidate.sponsor = {
-          userId: sponsorUserId,
-          announcementTransactionConfirmed: !!sponsor.wallet &&
-            !!sponsor.wallet.announcementTransaction &&
-            !!sponsor.wallet.announcementTransaction.blockNumber &&
-            !!sponsor.wallet.announcementTransaction.hash
-        };
-        if (!_.isEmpty(sponsor.name || '')) {
-          candidate.sponsor.name = sponsor.name;
-        }
-        if (!_.isEmpty(sponsor.profilePhotoUrl || '')) {
-          candidate.sponsor.profilePhotoUrl = sponsor.profilePhotoUrl;
-        }
+      let sponsor = _.find(self.existingUsers, (u: any) => { return u.email === candidate.prefineryUser.referredBy; });
+      if (!sponsor) {
+        candidate.importStatus = 'skipped-for-sponsor-email-lookup-failure';
+        resolve(false);
+      }
 
-        // add candidate to /users collection
-        return self.db.ref(`/users/${candidateUserId}`).set(candidate);
-      }).then(() => {
+      candidate.sponsor = {
+        userId: sponsor.userId,
+        announcementTransactionConfirmed: !!sponsor.wallet &&
+          !!sponsor.wallet.announcementTransaction &&
+          !!sponsor.wallet.announcementTransaction.blockNumber &&
+          !!sponsor.wallet.announcementTransaction.hash
+      };
+      if (!_.isEmpty(sponsor.name || '')) {
+        candidate.sponsor.name = sponsor.name;
+      }
+      if (!_.isEmpty(sponsor.profilePhotoUrl || '')) {
+        candidate.sponsor.profilePhotoUrl = sponsor.profilePhotoUrl;
+      }
+
+      if (_.isNumber(sponsor.downlineLevel)) {
+        candidate.downlineLevel = sponsor.downlineLevel + 1;
+      }
+      // add candidate to /users collection
+      self.db.ref(`/users/${candidate.userId}`).set(_.omit(candidate,['importStatus', 'userId'])).then(() => {
 
         // add candidate to sponsor's downline users
-        let sponsorRef = self.db.ref(`/users/${sponsorUserId}`);
-        return sponsorRef.child(`downlineUsers/${candidateUserId}`).set({
+        return self.db.ref(`/users/${sponsor.userId}/downlineUsers/${candidate.userId}`).set({
           name: candidate.name,
           profilePhotoUrl: candidate.profilePhotoUrl
         });
       }).then(() => {
-        self.candidateStatuses[index] = 'imported';
+        candidate.importStatus = 'imported';
+        self.existingUsers[candidate.userId] = candidate;
+        _.each(self.candidates, (c) => {
+          if (c.importStatus === 'skipped-for-missing-sponsor' && c.prefineryUser && c.prefineryUser.referredBy === candidate.email) {
+            candidate.importStatus = 'unprocessed';
+          }
+        });
         resolve(true);
       }, (error: any) => {
-        if (_.isString(error) && /^skipped\-/.test(error)) {
-          self.candidateStatuses[index] = error;
-        }
         reject(error);
       });
     });
   }
 
-  private importCandidates(): Promise<any> {
+  private importCandidatesUntilDone(nonInitial?: boolean): Promise<any> {
     let self = this;
+    self.importRound = (self.importRound || 0) + 1;
     return new Promise((resolve, reject) => {
+      log.info(`starting round ${self.importRound} of imports...`);
 
-      let numRecordsRemaining = _.size(self.candidates);
+      let numCandidates = _.size(self.candidates);
+      let randomCandidate = _.sample(self.candidates);
+      let unprocessedCandidates: any = _.pickBy(self.candidates, (c: any): boolean => { return c.importStatus === 'unprocessed'; });
+      let numRecordsRemaining = _.size(unprocessedCandidates);
       if (numRecordsRemaining === 0) {
-        resolve();
+        self.showStats();
+        if (self.doneLoading) {
+          resolve();
+        } else {
+          setTimeout(() => {
+            self.importCandidatesUntilDone().then(() => { resolve(); });
+          }, 10 * 10000);
+        }
         return;
       }
 
       let finalized = false;
-      _.each(self.candidates, (candidate, index) => {
-        self.importCandidate(candidate, index).then((imported) => {
+      _.each(unprocessedCandidates, (candidate) => {
+        self.importCandidate(candidate).then((imported) => {
           numRecordsRemaining--;
           if (!finalized && numRecordsRemaining === 0) {
             finalized = true;
-            resolve();
+            self.importCandidatesUntilDone().then(() => {
+              resolve();
+            });
           }
         }, (error) => {
           if (!finalized) {
@@ -147,53 +164,58 @@ export class ImportProcessor {
     });
   }
 
-  getPrefineryData(page?: number): Promise<any> {
+  private loadAllCandidatesFromPrefinery(page?: number): Promise<any> {
     let self = this;
+    self.candidates = self.candidates || {};
     return new Promise((resolve, reject) => {
-      page = page || 1;
       var request = require('request');
-      request({
-          url: `https://api.prefinery.com/api/v2/betas/9505/testers.json?api_key=dypeGz4qErzRuN143ZVN2fk2SagFqKPN&page=${page}`,
-          method: 'GET',
-          headers: { 'Content-Type': 'application/json' },
-          json: true
-        }, (error: any, response: any, prefineryUsers: any) => {
-
-        if (error) {
-          reject(`error retrieving data from the prefinery api: ${error}`);
-          return;
-        }
-
-        if (page === 1) {
-          self.importBatchId = self.db.ref("/users").push().key;
-        }
-
-        _.each(prefineryUsers, (prefineryUser) => {
-          log.info(prefineryUser)
-          if (prefineryUser.status === 'active') {
-            self.buildCandidate(prefineryUser);
+      page = page || 1;
+      let options = {
+        url: `https://api.prefinery.com/api/v2/betas/9505/testers.json?api_key=dypeGz4qErzRuN143ZVN2fk2SagFqKPN&page=${page}`,
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+        body: {},
+        json: true
+      };
+      try {
+        log.info(`requesting page ${page} of testers from prefinery...`);
+        request(options, (error: any, response: any, prefineryUsers: any) => {
+          if (error) {
+            reject(`error retrieving data from the prefinery api: ${error}`);
+            return;
           }
-        });
 
-        resolve();
-        // if (_.isEmpty(prefineryUsers)) {
-        //   resolve();
-        // } else {
-        //   self.getPrefineryData(page + 1).then(() => {
-        //     resolve();
-        //   }, (error: any) => {
-        //     reject(error);
-        //   });
-        // }
-      });
+          if (_.isEmpty(prefineryUsers)) {
+            resolve();
+            return;
+          };
+
+          if (page === 1) {
+            self.importBatchId = self.db.ref("/users").push().key; // HACK to generate id
+          }
+
+          _.each(prefineryUsers, (prefineryUser: any, index: number) => {
+            if (prefineryUser.status === 'active') {
+              let candidate: any = self.buildCandidate(prefineryUser);
+              self.candidates[candidate.userId] = candidate;
+            }
+          });
+
+          self.loadAllCandidatesFromPrefinery(page + 1).then(() => {
+            resolve();
+          }, (error) => {
+            reject(error);
+          });
+        });
+      } catch(error) {
+        reject(`got error when attempting to get data from prefinery: ${error}`);
+      }
     });
   }
 
   buildCandidate(prefineryUser: any) {
-    prefineryUser.importBatchId = this.importBatchId;
-    prefineryUser.importIndex = this.candidates.length;
-
     let processedPrefineryUser: any = {
+      importBatchId: this.importBatchId,
       id: prefineryUser.id,
       email: prefineryUser.email,
       ipAddress: prefineryUser.ip_address,
@@ -208,17 +230,18 @@ export class ImportProcessor {
       userReportedReferrer: (_.find((prefineryUser.responses || []), (r: any) => { return r.question_id === 82178 }) || {}).answer
     };
     processedPrefineryUser = _.mapValues(_.omitBy(processedPrefineryUser, _.isNil), (value: string) => { return _.trim(value || ''); });
-    let candidateUser: any = {
+    let candidate: any = {
       "firstName" : _.startCase(_.toLower(prefineryUser.profile.first_name)),
       "lastName" : _.startCase(_.toLower(prefineryUser.profile.last_name)),
       "email" : prefineryUser.email,
       "prefineryUser" : processedPrefineryUser,
       "createdAt" : firebase.database.ServerValue.TIMESTAMP
     };
-    candidateUser.name = `${candidateUser.firstName} ${candidateUser.lastName}`;
-    candidateUser.profilePhotoUrl = this.generateProfilePhotoUrl(candidateUser);
-    this.candidates.push(candidateUser);
-    this.candidateStatuses.push('unprocessed');
+    candidate.name = `${candidate.firstName} ${candidate.lastName}`;
+    candidate.profilePhotoUrl = this.generateProfilePhotoUrl(candidate);
+    candidate.importStatus = 'unprocessed';
+    candidate.userId = this.db.ref("/users").push().key;
+    return candidate;
   }
 
   shutdown(): Promise<any> {
