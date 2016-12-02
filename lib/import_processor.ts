@@ -197,7 +197,7 @@ export class ImportProcessor {
               return;
             }
             _.each(prefineryUsers, (prefineryUser: any, index: number) => {
-              if (prefineryUser.status === 'active') {
+              if (_.includes(['active', 'applied'],prefineryUser.status)) {
                 let candidate: any = self.buildCandidate(prefineryUser);
                 self.candidates[candidate.userId] = candidate;
               }
