@@ -30,12 +30,8 @@ export class ImportProcessor {
         self.existingUsers = snapshot.val() || {};
         _.each(self.existingUsers, (u,uid) => { u.userId = uid; });
         log.info(`${_.size(self.existingUsers)} preexisting users loaded`);
-        self.importCandidatesUntilDone().then(() => {
-          self.showStats();
+        self.loadCandidatesFromPrefinery(1).then(() => {
           resolve();
-        });
-        self.loadAllCandidatesFromPrefinery().then(() => {
-          self.doneLoading = true;
         }, (error: any) => {
           self.showStats();
           reject(error);
@@ -50,6 +46,10 @@ export class ImportProcessor {
   private showStats() {
     _.each(_.groupBy(this.candidates, 'importStatus'), (group, importStatus) => {
       log.info(`${_.size(group)} candidates ${importStatus}`);
+      if (importStatus === 'skipped-for-sponsor-email-lookup-failure') {
+        let uniqueSponsorEmails = _.uniq(_.map(group, (c: any) => { return c.prefineryUser && c.prefineryUser.referredBy; }));
+        log.info(`  with ${_.size(uniqueSponsorEmails)} unique sponsor emails`, uniqueSponsorEmails);
+      }
     });
   }
 
@@ -110,7 +110,7 @@ export class ImportProcessor {
         candidate.importStatus = 'imported';
         self.existingUsers[candidate.userId] = candidate;
         _.each(self.candidates, (c) => {
-          if (c.importStatus === 'skipped-for-missing-sponsor' && c.prefineryUser && c.prefineryUser.referredBy === candidate.email) {
+          if (c.importStatus === 'skipped-for-sponsor-email-lookup-failure' && c.prefineryUser && c.prefineryUser.referredBy === candidate.email) {
             candidate.importStatus = 'unprocessed';
           }
         });
@@ -121,10 +121,10 @@ export class ImportProcessor {
     });
   }
 
-  private importCandidatesUntilDone(nonInitial?: boolean): Promise<any> {
+  private importUnprocessedCandidates(): Promise<any> {
     let self = this;
-    self.importRound = (self.importRound || 0) + 1;
     return new Promise((resolve, reject) => {
+      self.importRound++;
       log.info(`starting round ${self.importRound} of imports...`);
 
       let numCandidates = _.size(self.candidates);
@@ -132,14 +132,7 @@ export class ImportProcessor {
       let unprocessedCandidates: any = _.pickBy(self.candidates, (c: any): boolean => { return c.importStatus === 'unprocessed'; });
       let numRecordsRemaining = _.size(unprocessedCandidates);
       if (numRecordsRemaining === 0) {
-        self.showStats();
-        if (self.doneLoading) {
-          resolve();
-        } else {
-          setTimeout(() => {
-            self.importCandidatesUntilDone().then(() => { resolve(); });
-          }, 10 * 10000);
-        }
+        resolve();
         return;
       }
 
@@ -149,7 +142,7 @@ export class ImportProcessor {
           numRecordsRemaining--;
           if (!finalized && numRecordsRemaining === 0) {
             finalized = true;
-            self.importCandidatesUntilDone().then(() => {
+            self.importUnprocessedCandidates().then(() => {
               resolve();
             });
           }
@@ -164,21 +157,22 @@ export class ImportProcessor {
     });
   }
 
-  private loadAllCandidatesFromPrefinery(page?: number): Promise<any> {
+  private loadCandidatesFromPrefinery(startPage: number): Promise<any> {
     let self = this;
     self.candidates = self.candidates || {};
+    self.importBatchId = self.importBatchId || self.db.ref("/users").push().key; // HACK to generate unique id
+
     return new Promise((resolve, reject) => {
       var request = require('request');
-      page = page || 1;
       let options = {
-        url: `https://api.prefinery.com/api/v2/betas/9505/testers.json?api_key=dypeGz4qErzRuN143ZVN2fk2SagFqKPN&page=${page}`,
+        url: `https://api.prefinery.com/api/v2/betas/9505/testers.json?api_key=dypeGz4qErzRuN143ZVN2fk2SagFqKPN&page=${startPage}`,
         method: 'GET',
         headers: { 'Content-Type': 'application/json' },
         body: {},
         json: true
       };
       try {
-        log.info(`requesting page ${page} of testers from prefinery...`);
+        log.info(`requesting page ${startPage} of testers from prefinery...`);
         request(options, (error: any, response: any, prefineryUsers: any) => {
           if (error) {
             reject(`error retrieving data from the prefinery api: ${error}`);
@@ -190,10 +184,6 @@ export class ImportProcessor {
             return;
           };
 
-          if (page === 1) {
-            self.importBatchId = self.db.ref("/users").push().key; // HACK to generate id
-          }
-
           _.each(prefineryUsers, (prefineryUser: any, index: number) => {
             if (prefineryUser.status === 'active') {
               let candidate: any = self.buildCandidate(prefineryUser);
@@ -201,7 +191,11 @@ export class ImportProcessor {
             }
           });
 
-          self.loadAllCandidatesFromPrefinery(page + 1).then(() => {
+          self.importRound = 0;
+          self.importUnprocessedCandidates().then(() => {
+            self.showStats();
+            return self.loadCandidatesFromPrefinery(startPage + 1);
+          }).then(() => {
             resolve();
           }, (error) => {
             reject(error);
