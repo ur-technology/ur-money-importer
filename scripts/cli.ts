@@ -1,3 +1,5 @@
+// step 1
+
 /// <reference path="../typings/index.d.ts" />
 
 import * as firebase from 'firebase';
@@ -7,7 +9,7 @@ var log = {
   info: console.log,
   debug: console.log,
   trace: console.log,
-  setDefaultLevel: (x) => {}
+  setDefaultLevel: (x) => { }
 }; // couldn't get loglevel to work, so faking it this way
 
 require('dotenv').config();
@@ -19,6 +21,10 @@ firebase.initializeApp({
   databaseURL: `https://${process.env.FIREBASE_PROJECT_ID}.firebaseio.com`
 });
 
+let ref = (path) => {
+  return firebase.database().ref(path);
+}
+
 let usersRef = () => {
   return firebase.database().ref(`/users`);
 };
@@ -27,90 +33,249 @@ let userRef = (id) => {
   return usersRef().child(id);
 };
 
-let users;
 
-
-usersRef().once('value', (snapshot) => {
-  users = snapshot.val() || {};
-  _.each(users, (u,uid) => { u.userId = uid; });
-  log.info(`${_.size(users)} users loaded`);
-});
-
-usersRef().once('value', (snapshot) => {
-  users = snapshot.val() || {};
-  _.each(users, (u,uid) => { u.userId = uid; });
-  log.info(`${_.size(users)} users loaded`);
-
-  let recordsProcessed = 0;
-  let recordsUpdated = 0;
-
-  let setNewDownlineLevel = (s) => {
-    recordsProcessed++;
-    let newDownlineLevel = s.downlineLevel + 1;
-    _.each(s.downlineUsers,(_,duid) => {
-      let d = users[duid];
-      if (!d) {
-        log.info(`this shouldn't happen! for duid ${duid}`);
-        return;
-      }
-      if (d.downlineLevel !== newDownlineLevel) {
-        d.downlineLevel = newDownlineLevel;
-        userRef(duid).child('downlineLevel').set(newDownlineLevel);
-        recordsUpdated++;
-      }
-      setNewDownlineLevel(d);
-    });
-  };
-
-  let startTime = new Date();
-  let topUser = _.find(users, (u) => { return u.email === 'jreitano@ur.technology' });
-  setNewDownlineLevel(topUser);
-  let endTime = new Date();
-  let minutesElapsed = (endTime - startTime)/1000/60;
-  log.info(`minutesElapsed=`, minutesElapsed);
-  log.info(`processed records=`,recordsProcessed);
-  log.info(`updated records=`,recordsUpdated);
-});
-
-setNewDownlineUsers = (users, u, index) => {
-  let directReferrals = _.pick(users, (d) => { return d.sponsor && d.sponsor.userId === u.userId});
-  let newDownlineUsers = _.mapValues(directReferrals, (d) => { return  _.pick(d, ['name', 'profilePhotoUrl']); });
-  if (u.downlineUsers && _.isEmpty(newDownlineUsers)) {
-    u.newDownlineUsers = newDownlineUsers;
-    userRef(u.userId).child('downlineUsers').remove();
-  } else if (!_.isEmpty(newDownlineUsers) && !_.isEqual(u.downlineUsers, newDownlineUsers)) {
-    u.newDownlineUsers = newDownlineUsers;
-    userRef(u.userId).child('downlineUsers').set(newDownlineUsers);
+let getUserStatus;
+getUserStatus = (user) => {
+  let status = _.trim((user.registration && user.registration.status) || '') || 'initial';
+  if (status === 'initial' && user.wallet && user.wallet.address) {
+    status = 'wallet-generated';
   }
+  return status;
+}
+
+let userGroups;
+userGroups = () => {
+  return _.groupBy(users, (u) => {
+   return getUserStatus(u) + ` - sponsor ${ u.sponsor && u.sponsor.announcementTransactionConfirmed ? '' : 'not' } confirmed`;
+ });
+}
+
+let users;
+let initializeMetaData;
+let addDownlineInfoToUpline;
+let roundNumbers;
+let potentialUrRewards;
+let numDirectReferrals;
+let numDownlineUsers;
+let bigPotentialRewards;
+let bigDirectReferrals;
+let bigDownlineUsers;
+
+let hasWallet;
+let fertile;
+let announcementAlreadyInitiated;
+let scenario0;
+let scenario0Users;
+let scenario1;
+let scenario1Users;
+let scenario2;
+let scenario2Users;
+let scenario3;
+let scenario3Users;
+let scenario4;
+let scenario4Users;
+let scenario5;
+let scenario5Users;
+let scenario6;
+let scenario6Users;
+let description;
+
+let csv;
+let json2csv;
+let fs;
+
+potentialUrRewards = (u) => { return u.d.potentialUrRewards; };
+numDirectReferrals = (u) => { return u.d.numDirectReferrals; };
+numDownlineUsers = (u) => { return u.d.numDownlineUsers; };
+
+initializeMetaData = (u: any) => {
+  let firstName: string = _.trim(u.firstName || '');
+  if (/[^a-zA-Z ]/.test(firstName)) {
+    firstName = '';
+  }
+  u.d = {
+    firstName: firstName || 'UR Member',
+    potentialUrRewards: 0,
+    numDirectReferrals: 0,
+    numDownlineUsers: 0
+  };
 };
 
-let users;
-usersRef().once('value', (snapshot) => {
-  let users = snapshot.val() || {};
-  _.each(users, (u,uid) => { u.userId = uid; });
-  log.info(`${_.size(users)} users loaded`);
+roundNumbers = (u: any) => {
+  u.d.potentialUrRewards = Math.round(u.d.potentialUrRewards);
+};
 
-  let startTime = new Date();
-  let index = 0;
-  _.each(users, (u) => {
-    setNewDownlineLevel(users, u, index);
-    index++;
-  });
-  let endTime = new Date();
-  let minutesElapsed = (endTime - startTime)/1000/60;
-  log.info(`minutesElapsed=`, minutesElapsed);
-  log.info(`updated records=`,_.size(_.filter(users, 'newDownlineLevel')));
-});
-
-let vipEmails = ['k.fingal@gmail.com', 'bugmenot134@yahoo.com', 'mikepola3@gmail.com', 'barbarahagood1@gmail.com', 'courtneydanne@gmail.com', 'schroder.jordanb@gmail.com', 'grahamj412@gmail.com', 'jenniferlovesjamie@comcast.net', 'viviana.schaller@outlook.de', 'moh.rokib.94.mr@gmail.com', 'lulasmom617@gmail.com', 'santiagoenriqueescobedo@gmail.com', 'nimblues@gmail.com', 'mamadmomod238@gmail.com', 'tripp@chamblin.com', 'nacnaus2@gmail.com', 'mcrawford@rymanhp.com', 'adam@sobrolaw.com', 'stever@equitas-intl.com', 'wtwebb2@comcast.net', 'clement.webb@gmail.com', 'holybloood89@gmail.ua', 'flynn.mcrae21@montgomerybell.edu', 'herofrog243@gmail.com', 'mcdugaldj@gmail.com', 'max.d.giorgio@gmail.com', 'wrenkis@me.com', 'truettmckeehan@gmail.com', 'howardeglover@gmail.com', 'btcman007@gmail.com', 'slimane.bouaoud1@gmail.com', 'jannejac@gmail.com', 'thomasmcdaniel9@gmail.com', 'karin.kristiansson62@gmail.com', 'mats.betterglobe@gmail.com', 'ggtupe@yahoo.com', 'ternovicnews@gmail.com', 'vladeo1x@gmail.com', 'iqball26@hotmail.com'];
-let vips = _.map(vipEmails, (e) => { return _.find(users, (u) => { return u.email === e; }) });
-_.map(vips, (u) => { return `${u.email}\t${ ( u.registration && u.registration.status ) || 'created-wallet'}`; });
-
-let groups = _.groupBy(vips, (u) => {
-  if (!u.wallet || !u.wallet.address) {
-    return "never-logged-in";
-  } else {
-    return ( u.registration && u.registration.status ) || 'created-wallet';
+addDownlineInfoToUpline = (u) => {
+  let status = (u.registration && u.registration.status) || 'initial';
+  if (u.disabled && status === 'announcement-confirmed') {
+    return;
   }
+  let bonuses = [60.60,60.60,121.21,181.81,303.03,484.84,787.91];
+
+  let targetUser = u;
+  for (let level = 0; level < 7; level++) {
+    targetUser = targetUser.sponsor && targetUser.sponsor.userId && users[targetUser.sponsor.userId];
+    if (!targetUser) {
+      break;
+    }
+    if (level === 0) {
+      targetUser.d.numDirectReferrals = (targetUser.d.numDirectReferrals || 0) + 1;
+    }
+    targetUser.d.numDownlineUsers = (targetUser.d.numDownlineUsers || 0) + 1;
+    targetUser.d.potentialUrRewards = (targetUser.d.potentialUrRewards || 0) + bonuses[level];
+  }
+}
+
+hasWallet = (u: any): boolean => {
+  return !!u.wallet && !!u.wallet.address;
+}
+
+fertile = (u: any): boolean => {
+  if (_.isUndefined(u.d.fertile)) {
+    let sponsor:any = u.sponsor && u.sponsor.userId && users[u.sponsor && u.sponsor.userId];
+    u.d.fertile = !u.disabled && hasWallet(u) && (!sponsor || fertile(sponsor));
+  }
+  return u.d.fertile;
+}
+
+announcementAlreadyInitiated = (u: any): boolean => {
+  let status = (u.registration && u.registration.status) || 'initial';
+  let initiatedStatuses = [ 'announcement-requested', 'announcement-initiated', 'announcement-confirmed' ];
+  return _.includes(initiatedStatuses, status);
+};
+
+scenario0 = (u: any): boolean => {
+  if (_.isUndefined(u.d.scenario0)) {
+    u.d.scenario0 = announcementAlreadyInitiated(u);
+  }
+  return u.d.scenario0;
+}
+
+scenario1 = (u: any): boolean => {
+  if (_.isUndefined(u.d.scenario1)) {
+    let sponsor:any = u.sponsor && u.sponsor.userId && users[u.sponsor && u.sponsor.userId];
+    u.d.scenario1 = !u.disabled && hasWallet(u) && !!sponsor && fertile(sponsor) && !announcementAlreadyInitiated(u);
+  }
+  return u.d.scenario1;
+}
+
+scenario2 = (u: any): boolean => {
+  if (_.isUndefined(u.d.scenario2)) {
+    let sponsor:any = u.sponsor && u.sponsor.userId && users[u.sponsor && u.sponsor.userId];
+    u.d.scenario2 = !u.disabled && hasWallet(u) && !!sponsor && !fertile(sponsor);
+  }
+  return u.d.scenario2;
+}
+
+scenario3 = (u: any): boolean => {
+  if (_.isUndefined(u.d.scenario3)) {
+    let sponsor:any = u.sponsor && u.sponsor.userId && users[u.sponsor && u.sponsor.userId];
+    u.d.scenario3 = !u.disabled && !hasWallet(u) && !!sponsor && !fertile(sponsor) && u.d.numDownlineUsers === 0;
+  }
+  return u.d.scenario3;
+}
+
+scenario4 = (u: any): boolean => {
+  if (_.isUndefined(u.d.scenario4)) {
+    let sponsor:any = u.sponsor && u.sponsor.userId && users[u.sponsor && u.sponsor.userId];
+    u.d.scenario4 = !u.disabled && !hasWallet(u) && u.d.numDownlineUsers > 0
+  }
+  return u.d.scenario4;
+}
+
+scenario5 = (u: any): boolean => {
+  if (_.isUndefined(u.d.scenario5)) {
+    let sponsor:any = u.sponsor && u.sponsor.userId && users[u.sponsor && u.sponsor.userId];
+    u.d.scenario5 = !u.disabled && !hasWallet(u) && !!sponsor && fertile(sponsor) && u.d.numDownlineUsers === 0;
+  }
+  return u.d.scenario5;
+}
+
+scenario6 = (u: any): boolean => {
+  if (_.isUndefined(u.d.scenario6)) {
+    u.d.scenario6 = !!u.disabled;
+  }
+  return u.d.scenario6;
+}
+
+
+usersRef().once('value', (snapshot) => {
+  users = snapshot.val() || {};
+  _.each(users, (u, uid) => { u.userId = uid; });
+  log.info(`${_.size(users)} users loaded`);
+  log.info('user groups', userGroups());
 });
-let groups2 = _.mapValues(groups, (g, status) => { let m = {}; _.each(g, (u) => { m[u.email] = u; }); return m; });
+
+// step 2
+
+_.each(users, initializeMetaData);
+_.each(users, addDownlineInfoToUpline);
+_.each(users, roundNumbers);
+bigPotentialRewards = _.takeRight(_.sortBy(users, potentialUrRewards),20);
+bigDirectReferrals = _.takeRight(_.sortBy(users, numDirectReferrals),20);
+bigDownlineUsers = _.takeRight(_.sortBy(users, numDownlineUsers),20);
+
+scenario0Users = _.filter(users, scenario0);
+scenario1Users = _.filter(users, scenario1);
+scenario2Users = _.filter(users, scenario2);
+scenario3Users = _.filter(users, scenario3);
+scenario4Users = _.filter(users, scenario4);
+scenario5Users = _.filter(users, scenario5);
+scenario6Users = _.filter(users, scenario6);
+
+json2csv = require('json2csv');
+fs = require('fs');
+
+_.each([
+  {users: scenario1Users, jobName: 'scenario1'},
+  {users: scenario2Users, jobName: 'scenario2'},
+  {users: scenario3Users, jobName: 'scenario3'},
+  {users: scenario4Users, jobName: 'scenario4'},
+  {users: scenario5Users, jobName: 'scenario5'}
+], (job) => {
+  csv = json2csv({
+    data: _.filter(job.users, 'email'),
+    fields: ['email', 'd.firstName', 'd.numDirectReferrals', 'd.numDownlineUsers', 'd.potentialUrRewards'],
+    fieldNames: ['email', 'firstName', 'numDirectReferrals', 'numDownlineUsers', 'potentialUrRewards']
+  });
+
+  fs.writeFile(`${job.jobName}.csv`, csv, (err) => {
+    if (err) throw err;
+    console.log('file saved');
+  });
+});
+
+description = (u) => {
+  return (u.d.scenario0 ? '0' : '') + (u.d.scenario1 ? '1' : '') + (u.d.scenario2 ? '2' : '') +
+    (u.d.scenario3 ? '3' : '') + (u.d.scenario4 ? '4' : '') + (u.d.scenario5 ? '5' : '') +
+    (u.d.scenario6 ? '6' : '');
+};
+_.groupBy(_.values(users), description);
+
+
+let announceUsers;
+announceUsers = () => {
+  let initiatedCount = 0;
+  _.each(scenario1Users, (u, index) => {
+    let sponsor: any = u.sponsor && u.sponsor.userId && users[u.sponsor && u.sponsor.userId];
+    if (!u.disabled &&
+      !announcementAlreadyInitiated(u) &&
+      u.wallet &&
+      u.wallet.address &&
+      sponsor &&
+      !sponsor.disabled &&
+      sponsor.wallet &&
+      sponsor.wallet.address &&
+      sponsor.wallet.announcementTransaction &&
+      sponsor.wallet.announcementTransaction.blockNumber &&
+      sponsor.wallet.announcementTransaction.hash) {
+      firebase.database().ref(`/identityAnnouncementQueue/tasks/${u.userId}`).set({userId: u.userId});
+      u.d.initiatedAnnouncement = true;
+      initiatedCount++;
+    } else {
+      u.d.initiatedAnnouncement = false;
+    }
+  });
+  log.info(`initiatedCount: `, initiatedCount);
+}
+announceUsers();

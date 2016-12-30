@@ -9,11 +9,9 @@ export class ImportProcessor {
   db: any;
   importBatchId: string;
   sponsorUserIdsQueue: any[] = [];
-  existingUsers: any;
   candidates: any;
   numUsersProcessed: number;
-  importRound: number;
-  doneLoading: boolean;
+  existingUsers: any;
 
   constructor(env: any) {
     this.db = firebase.database();
@@ -23,21 +21,9 @@ export class ImportProcessor {
   start(): Promise<any> {
     return new Promise((resolve, reject) => {
       let self = this;
-
-      self.doneLoading = false;
-
-      self.db.ref('/users').once('value', (snapshot: firebase.database.DataSnapshot) => {
-        self.existingUsers = snapshot.val() || {};
-        _.each(self.existingUsers, (u,uid) => { u.userId = uid; });
-        log.info(`${_.size(self.existingUsers)} preexisting users loaded`);
-        self.loadCandidatesFromPrefinery(1).then(() => {
-          resolve();
-        }, (error: any) => {
-          self.showStats();
-          reject(error);
-        });
+      self.loadCandidatesFromPrefinery(1).then(() => {
+        resolve();
       }, (error: any) => {
-        self.showStats();
         reject(error);
       });
     });
@@ -59,94 +45,89 @@ export class ImportProcessor {
     let self = this;
     return new Promise((resolve, reject) => {
 
-      if (_.isEmpty(_.trim(candidate.email || ''))) {
-        candidate.importStatus = 'skipped-for-missing-sponsor-email';
-        resolve(false);
-        return;
-      }
-
-      if (_.some(self.existingUsers, (u: any) => { return u.email === candidate.email })) {
-        candidate.importStatus = 'skipped-for-duplicate-email';
-        resolve(false);
-        return;
-      }
-
-      if (_.some(self.existingUsers, (u: any) => { return u.prefineryUser && candidate.prefineryUser && u.prefineryUser.id === candidate.prefineryUser.id; })) {
-        candidate.importStatus = 'skipped-for-duplicate-prefinery-id';
-        resolve(false);
-        return;
-      }
-
-      let sponsor = _.find(self.existingUsers, (u: any) => { return u.email === candidate.prefineryUser.referredBy; });
-      if (!sponsor) {
-        candidate.importStatus = 'skipped-for-sponsor-email-lookup-failure';
-        resolve(false);
-      }
-
-      candidate.sponsor = {
-        userId: sponsor.userId,
-        announcementTransactionConfirmed: !!sponsor.wallet &&
-          !!sponsor.wallet.announcementTransaction &&
-          !!sponsor.wallet.announcementTransaction.blockNumber &&
-          !!sponsor.wallet.announcementTransaction.hash
-      };
-      if (!_.isEmpty(sponsor.name || '')) {
-        candidate.sponsor.name = sponsor.name;
-      }
-      if (!_.isEmpty(sponsor.profilePhotoUrl || '')) {
-        candidate.sponsor.profilePhotoUrl = sponsor.profilePhotoUrl;
-      }
-
-      if (_.isNumber(sponsor.downlineLevel)) {
-        candidate.downlineLevel = sponsor.downlineLevel + 1;
-      }
-      // add candidate to /users collection
-      self.db.ref(`/users/${candidate.userId}`).set(_.omit(candidate,['importStatus', 'userId'])).then(() => {
-
-        // add candidate to sponsor's downline users
-        return self.db.ref(`/users/${sponsor.userId}/downlineUsers/${candidate.userId}`).set({
+      self.lookupUserByEmail(candidate.email).then((matchingUser: any) => {
+        if (matchingUser) {
+          return Promise.reject('skipped-for-duplicate-email')
+        } else if (_.isEmpty(_.trim((candidate.prefineryUser && candidate.prefineryUser.referredBy) || ''))) {
+          return Promise.reject('skipped-for-missing-sponsor-email');
+        } else {
+          return self.lookupUserByEmail(candidate.prefineryUser.referredBy);
+        }
+      }).then((sponsor: any) => {
+        if (sponsor) {
+          self.addSponsorInfo(candidate, sponsor);
+          return self.db.ref(`/users/${candidate.userId}`).set(_.omit(candidate,['importStatus', 'userId']));
+        } else {
+          return Promise.reject('skipped-for-sponsor-email-lookup-failure');
+        }
+      }).then(() => {
+        return self.db.ref(`/users/${candidate.sponsor.userId}/downlineUsers/${candidate.userId}`).set({
           name: candidate.name,
           profilePhotoUrl: candidate.profilePhotoUrl
         });
       }).then(() => {
-        candidate.importStatus = 'imported';
-        self.existingUsers[candidate.userId] = candidate;
         _.each(self.candidates, (c) => {
           if (c.importStatus === 'skipped-for-sponsor-email-lookup-failure' && c.prefineryUser && c.prefineryUser.referredBy === candidate.email) {
             c.importStatus = 'unprocessed';
           }
         });
-        resolve(true);
-      }, (error: any) => {
-        reject(error);
+        resolve('imported');
+      }, (errorOrStatus: any) => {
+        if (_.isString(errorOrStatus) && /^skipped\-/.test(errorOrStatus)) {
+          resolve(errorOrStatus)
+        } else {
+          reject(errorOrStatus);
+        }
       });
     });
   }
 
-  private importUnprocessedCandidates(): Promise<any> {
+  private addSponsorInfo(candidate: any, sponsor: any) {
+    candidate.sponsor = {
+      userId: sponsor.userId,
+      announcementTransactionConfirmed: !!sponsor.wallet &&
+        !!sponsor.wallet.announcementTransaction &&
+        !!sponsor.wallet.announcementTransaction.blockNumber &&
+        !!sponsor.wallet.announcementTransaction.hash
+    };
+    if (!_.isEmpty(sponsor.name || '')) {
+      candidate.sponsor.name = sponsor.name;
+    }
+    if (!_.isEmpty(sponsor.profilePhotoUrl || '')) {
+      candidate.sponsor.profilePhotoUrl = sponsor.profilePhotoUrl;
+    }
+    if (_.isNumber(sponsor.downlineLevel)) {
+      candidate.downlineLevel = sponsor.downlineLevel + 1;
+    }
+  }
+
+  private importUnprocessedCandidates(newDataEncountered: boolean): Promise<any> {
     let self = this;
     return new Promise((resolve, reject) => {
-      self.importRound++;
 
       let numCandidates = _.size(self.candidates);
       let randomCandidate = _.sample(self.candidates);
       let unprocessedCandidates: any = _.pickBy(self.candidates, (c: any): boolean => { return c.importStatus === 'unprocessed'; });
       let numRecordsRemaining = _.size(unprocessedCandidates);
       if (numRecordsRemaining === 0) {
-        resolve();
+        resolve(newDataEncountered);
         return;
       }
 
-      log.info(`  starting round ${self.importRound} of imports...`);
+      log.info(`  starting round of imports...`);
       let finalized = false;
       _.each(unprocessedCandidates, (candidate) => {
-        self.importCandidate(candidate).then((imported) => {
+        self.importCandidate(candidate).then((importStatus) => {
+          candidate.importStatus = importStatus;
+          if (importStatus !== 'skipped-for-duplicate-email') {
+            newDataEncountered = true;
+          }
           numRecordsRemaining--;
           if (!finalized && numRecordsRemaining === 0) {
-            self.importUnprocessedCandidates().then(() => {
+            self.importUnprocessedCandidates(newDataEncountered).then(() => {
               if (!finalized) {
                 finalized = true;
-                resolve();
+                resolve(newDataEncountered);
               }
             }, (error) => {
               if (!finalized) {
@@ -173,67 +154,42 @@ export class ImportProcessor {
 
     return new Promise((resolve, reject) => {
       var request = require('request');
-      let finalized: boolean = false;
-      let GROUP_SIZE = 1;
-      let numPagesRemaining = GROUP_SIZE;
-      let emptyPageEncountered = false;
 
-      log.info(`requesting pages ${startPage} through ${startPage + GROUP_SIZE - 1} of testers from prefinery...`);
-      for (let index = 0; index < GROUP_SIZE; index++) {
-        let page = startPage + index;
-        try {
-          let options = {
-            url: `https://api.prefinery.com/api/v2/betas/9505/testers.json?api_key=dypeGz4qErzRuN143ZVN2fk2SagFqKPN&page=${page}`,
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' },
-            body: {},
-            json: true
-          };
-          request(options, (error: any, response: any, prefineryUsers: any) => {
-            if (finalized) {
-              return;
-            }
-            if (error) {
-              finalized = true;
-              reject(`error retrieving data from the prefinery api: ${error}`);
-              return;
-            }
-            _.each(prefineryUsers, (prefineryUser: any, index: number) => {
-              if (_.includes(['active', 'applied'],prefineryUser.status)) {
-                let candidate: any = self.buildCandidate(prefineryUser);
-                self.candidates[candidate.userId] = candidate;
-              }
-            });
-            if (_.isEmpty(prefineryUsers)) {
-              emptyPageEncountered = true;
-            }
-            numPagesRemaining--;
-            if (numPagesRemaining === 0) {
-              self.importRound = 0;
-              self.importUnprocessedCandidates().then(() => {
-                self.showStats();
-                if (emptyPageEncountered) {
-                  return Promise.resolve(undefined);
-                } else {
-                  return self.loadCandidatesFromPrefinery(startPage + GROUP_SIZE);
-                }
-              }).then(() => {
-                if (!finalized) {
-                  finalized = true;
-                  resolve();
-                }
-              }, (error) => {
-                reject(error);
-              });
-            }
-
-          });
-        } catch(error) {
-          if (!finalized) {
-            finalized = true;
-            reject(`got error when attempting to get data from prefinery: ${error}`);
+      log.info(`requesting page ${startPage} of testers from prefinery...`);
+      try {
+        let options = {
+          url: `https://api.prefinery.com/api/v2/betas/9505/testers.json?api_key=dypeGz4qErzRuN143ZVN2fk2SagFqKPN&page=${startPage}`,
+          method: 'GET',
+          headers: { 'Content-Type': 'application/json' },
+          body: {},
+          json: true
+        };
+        request(options, (error: any, response: any, prefineryUsers: any) => {
+          if (error) {
+            reject(`error retrieving data from the prefinery api: ${error}`);
+            return;
           }
-        }
+          _.each(prefineryUsers, (prefineryUser: any, index: number) => {
+            if (_.includes(['active', 'applied'],prefineryUser.status)) {
+              let candidate: any = self.buildCandidate(prefineryUser);
+              self.candidates[candidate.userId] = candidate;
+            }
+          });
+          self.importUnprocessedCandidates(false).then((newDataEncountered: boolean) => {
+            self.showStats();
+            if (newDataEncountered) {
+              return self.loadCandidatesFromPrefinery(startPage + 1);
+            } else {
+              return Promise.resolve(undefined);
+            }
+          }).then(() => {
+            resolve();
+          }, (error) => {
+            reject(error);
+          });
+        });
+      } catch(error) {
+        reject(`got error when attempting to get data from prefinery: ${error}`);
       }
     });
   }
@@ -377,28 +333,7 @@ export class ImportProcessor {
     let self = this;
     return new Promise((resolve, reject) => {
       self.lookupUsersByEmail(email).then((matchingUsers) => {
-
-        if (_.isEmpty(matchingUsers)) {
-          log.info(`no matching user found for ${email}`);
-          resolve(undefined);
-          return;
-        }
-
-        let activeUsers = _.reject(matchingUsers, 'disabled');
-        if (_.isEmpty(activeUsers)) {
-          let disabledUser: any = _.first(matchingUsers);
-          log.info(`found matching user ${disabledUser.userId} for ${email} but user was disabled`);
-          resolve(undefined);
-          return;
-        }
-        if (_.size(activeUsers) > 1) {
-          reject(`more than one active user found for ${email}`);
-          return;
-        }
-
-        let matchingUser: any = _.first(activeUsers);
-        // log.debug(`matching user with userId ${matchingUser.userId} found for ${email}`);
-        resolve(matchingUser);
+        resolve(_.first(matchingUsers));
       }, (error) => {
         reject(error);
       });
@@ -406,7 +341,8 @@ export class ImportProcessor {
   }
 
   lookupUsersByEmail(email: string): Promise<any[]> {
-    let ref = this.db.ref("/users").orderByChild("email").equalTo(email);
+    let ref = this.
+    db.ref("/users").orderByChild("email").equalTo(email);
     return this.lookupUsers(ref);
   }
 
