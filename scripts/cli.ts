@@ -32,6 +32,10 @@ let userRef = (u) => {
   return usersRef().child(u.userId);
 };
 
+let hasSponsor = (u) => {
+  return !!getSponsor(u);
+};
+
 let getSponsor = (u) => {
   return users[u.sponsor && u.sponsor.userId];
 };
@@ -45,7 +49,7 @@ getUserStatus = (user) => {
   let status = _.trim((user.registration && user.registration.status) || '');
   if (status !== 'announcement-confirmed' && status !== 'announcement-initiated')  {
     if (user.wallet && user.wallet.address) {
-     let sponsor = users[user.sponsor && user.sponsor.userId];
+     let sponsor = getSponsor(user);
       if (user.disabled) {
         status = 'disabled';
       } else if (!sponsor || sponsor.disabled || !sponsor.wallet ||
@@ -68,33 +72,6 @@ let userGroups = (sampleUsers) => {
    return getUserStatus(u) + ` - sponsor ${ sponsorConfirmed ? '' : 'not' } confirmed`;
  });
 }
-
-let bigPotentialRewards;
-let bigDirectReferrals;
-let bigDownlineUsers;
-
-let hasWallet;
-let fertile;
-let announcementAlreadyInitiated;
-let scenario0;
-let scenario0Users;
-let scenario1;
-let scenario1Users;
-let scenario2;
-let scenario2Users;
-let scenario3;
-let scenario3Users;
-let scenario4;
-let scenario4Users;
-let scenario5;
-let scenario5Users;
-let scenario6;
-let scenario6Users;
-let description;
-
-let csv;
-let json2csv;
-let fs;
 
 let initializeMetaData = (u: any) => {
   u.d = {
@@ -128,13 +105,9 @@ let addDownlineInfoToUpline = (u) => {
   }
 }
 
-hasWallet = (u: any): boolean => {
+let hasWallet = (u: any): boolean => {
   return !!u.wallet && !!u.wallet.address;
 }
-
-announcementAlreadyInitiated = (u: any): boolean => {
-  return /^announcement-/.test((u.registration && u.registration.status) || '');
-};
 
 let setSponsorToEiland = (u) => {
   let eiland = _.find(users, {email: 'eiland@ur.technology'});
@@ -165,7 +138,7 @@ let fixOrphans = () => {
 };
 
 let blocker = (u) => {
-  let sponsor = users[u.sponsor && u.sponsor.userId];
+  let sponsor = getSponsor(u);
   if (u.email === 'eiland@ur.technology' || u.email === 'jreitano@ur.technology' || !sponsor) {
     return undefined;
   }
@@ -176,40 +149,43 @@ let blocker = (u) => {
   }
 };
 
+let isTopUser = (u) => {
+   return u.email === 'jreitano@ur.technology';
+}
+
+let walletEnabled = (u) => {
+  return hasWallet(u) && !u.disabled && (hasSponsor(u) || isTopUser(u));
+};
+
+let announcementAlreadyInitiated = (u: any): boolean => {
+  return /^announcement-/.test((u.registration && u.registration.status) || '') ||
+    (u.wallet.announcementTransaction && (u.wallet.announcementTransaction.blockNumber || u.wallet.announcementTransaction.hash))
+};
+
+let readyForAnnouncement = (u) => {
+  return walletEnabled(u) && !announcementAlreadyInitiated(u);
+}
+
+let isBlocked = (u) => {
+  return readyForAnnouncement(u) && !!blocker(u);
+}
+
 let newSponsor = (u) => {
-  if (!readyForAnnouncement(u) || !isBlocked(u)) {
+  if (!isBlocked(u)) {
     return undefined;
   }
 
   let currentUser = u;
   while(true) {
     currentUser = getSponsor(currentUser);
-    if (accountFullySetUp(currentUser) && !isBlocked(currentUser)) {
+    if (walletEnabled(currentUser) && !isBlocked(currentUser)) {
       return currentUser;
     }
   }
 };
 
-let accountFullySetUp = (u) => {
-  if (u.email === 'eiland@ur.technology' || u.email === 'jreitano@ur.technology') {
-    return true;
-  }
-
-  let sponsor = users[u.sponsor && u.sponsor.userId];
-  return !!u.wallet &&
-    !!u.wallet.address &&
-    !u.disabled &&
-    !!sponsor;
-};
-
-let readyForAnnouncement = (u) => {
-  return accountFullySetUp(u) &&
-    !(u.wallet.announcementTransaction && (u.wallet.announcementTransaction.blockNumber || u.wallet.announcementTransaction.hash)) &&
-    !announcementAlreadyInitiated(u);
-}
-
-let isBlocked = (u) => {
-  return readyForAnnouncement(u) && !!blocker(u);
+let blockedUsers = () => {
+  return _.filter(users, isBlocked);
 }
 
 let isAnnounceable = (u) => {
@@ -244,9 +220,6 @@ let downlineUsers = (u) => {
   return referrals.concat(_.flatten(_.map(referrals, downlineUsers)));
 }
 // downlineUsers(a);
-
-let Web3 = require('web3');
-let web3 = new Web3(new Web3.providers.HttpProvider('https://www.relay.ur.technology:9596'));
 
 let convertPushIdToTimestamp = (id) => {
   var PUSH_CHARS = "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz";
@@ -332,3 +305,6 @@ let loadUsers = () => {
   });
 }
 loadUsers();
+
+let Web3 = require('web3');
+let web3 = new Web3(new Web3.providers.HttpProvider('https://www.relay.ur.technology:9596'));
