@@ -3,18 +3,21 @@
 import * as dotenv from 'dotenv';
 import * as _ from 'lodash';
 
+let BigNumber = require('bignumber.js');
+
 let log = {
   info: console.log,
   debug: console.log,
   trace: console.log,
   setDefaultLevel: (x) => {}
-}; // couldn't get loglevel to work, so faking it this way
+}; // couldn't get loglevel to work in Mancy, so faking it this way
 
 class DataManipulator {
   env: any;
   db: any;
   auth: any;
   users: any;
+  usersWithBonuses: any[];
   stop: boolean;
 
   constructor(env: any, db: any, auth: any) {
@@ -267,10 +270,6 @@ class DataManipulator {
     });
   }
 
-  private simplifyUser(u: any) {
-    let simplifiedUser = _.pick(u, ['firstName', 'lastName', 'email', 'phone', 'sponsor', 'wallet']);
-  }
-
   loadUsers(lastAddress?: string): Promise<any> {
     let self = this;
     return new Promise((resolve, reject) => {
@@ -283,7 +282,7 @@ class DataManipulator {
       log.info(`retrieving users with address ${lastAddress + '-'} through 9x...`);
       self.ref("/users").orderByChild('wallet/address').limitToFirst(batchSize).startAt(lastAddress + '-').endAt("9x").once("value", (snapshot: firebase.database.DataSnapshot) => {
         let newUsers = _.mapValues(snapshot.val() || {}, (user, userId) => {
-          return _.merge(_.pick(user, ['name', 'email', 'phone', 'wallet', 'sponsor', 'disabled', 'registration']), {userId: userId});
+          return _.merge(_.pick(user, ['name', 'email', 'phone', 'wallet', 'sponsor', 'disabled', 'registration', 'transactions', 'countryCode']), {userId: userId});
         });
 
         let numNewUsers = _.size(newUsers);
@@ -308,9 +307,9 @@ class DataManipulator {
           log.info(`1.1 disabled users: ${_.size(disabledUsers)}`);
           log.info(`1.2 nonDisabled users: ${_.size(nonDisabledUsers)}`);
 
-          let usersWithBonuses = _.filter(nonDisabledUsers, 'wallet.announcementTransaction.blockNumber');
+          self.usersWithBonuses = _.filter(nonDisabledUsers, 'wallet.announcementTransaction.blockNumber');
           let usersWithoutBonuses = _.reject(nonDisabledUsers, 'wallet.announcementTransaction.blockNumber');
-          log.info(`1.2.1 usersWithBonuses: ${_.size(usersWithBonuses)}`);
+          log.info(`1.2.1 usersWithBonuses: ${_.size(self.usersWithBonuses)}`);
           log.info(`1.2.2 usersWithoutBonuses: ${_.size(usersWithoutBonuses)}`);
 
           let blockedUsers: any = _.filter(usersWithoutBonuses, (u: any) => { return self.isBlocked(u); });
@@ -350,4 +349,11 @@ admin.initializeApp({
 let dataManipulator = new DataManipulator(process.env, admin.database(), admin.auth());
 dataManipulator.loadUsers().then(() => {
   log.info("all done loading users!");
+  let x;
+  x = _.filter(dataManipulator.usersWithBonuses, 'transactions');
+  x = _.map(x, (u)  => { return _.filter(u.transactions, {type: 'sent'}); });
+  x = _.flatten(x);
+  x = _.uniq(_.map(x, 'urTransaction.hash'));
+  x = _.size(x);
+  log.info(`x=${_.size(x)}`)
 });
