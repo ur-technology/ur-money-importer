@@ -12,6 +12,6 @@
   },
   "dependencies": {
     "bignumber.js": "registry:npm/bignumber.js#2.4.0+20160714211320",
-    "lodash": "registry:npm/lodash#4.0.0+20161015015725"
+    "lodash": "registry:npm/lodash#4.0.0+20160723033700"
   }
 }
