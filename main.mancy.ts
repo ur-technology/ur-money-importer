@@ -24,7 +24,7 @@ class DataManipulator {
     this.env = env;
     this.db = db;
     this.auth = auth;
-    // _.uniqBy = require('lodash.uniqby');
+    _.uniqBy = require('lodash.uniqby');
     // _.keyBy = require('lodash.keyby');
     // _.intersectionBy = require('lodash.intersectionby');
   }
@@ -349,11 +349,67 @@ admin.initializeApp({
 let dataManipulator = new DataManipulator(process.env, admin.database(), admin.auth());
 dataManipulator.loadUsers().then(() => {
   log.info("all done loading users!");
-  let x;
-  x = _.filter(dataManipulator.usersWithBonuses, 'transactions');
-  x = _.map(x, (u)  => { return _.filter(u.transactions, {type: 'sent'}); });
-  x = _.flatten(x);
-  x = _.uniq(_.map(x, 'urTransaction.hash'));
-  x = _.size(x);
-  log.info(`x=${_.size(x)}`)
+
+  // let usersWithSentTransactions, sentTransactions, reusedToAddresses, suspects;
+  //
+  // usersWithSentTransactions = _.filter(dataManipulator.usersWithBonuses, (u) => {
+  //   return _.some(u.transactions || {}, {type: 'sent'});
+  // });
+  //
+  // sentTransactions = _.flatten(
+  //   _.map(usersWithSentTransactions, (u) => {
+  //     return _.uniqBy(_.filter(u.transactions, {type: 'sent'}), 'urTransaction.to');
+  //   })
+  // );
+  //
+  // reusedToAddresses = _.keys(
+  //   _.pick(
+  //     _.groupBy(sentTransactions, 'urTransaction.to'),
+  //     (dups, to) => { return dups.length > 2; }
+  //   )
+  // );
+  // suspects = _.filter(dataManipulator.usersWithBonuses, (u) => {
+  //   let addresses = _.map(_.filter(u.transactions || {}, {type: 'sent'}), 'urTransaction.to');
+  //   return !_.isEmpty(_.intersection(addresses, reusedToAddresses));
+  // });
+  //
+  // log.info(`users who sent ur=${_.size(usersWithSentTransactions)}`);
+  // log.info(`suspects=${_.size(suspects)}`);
+
+  let transactionHashes = _.flatten(
+    _.uniq(_.flatten(
+      _.map(dataManipulator.users, (u) => { return _.keys(u.transactions || {}); })
+    ))
+  );
+  let transactionHashChunks = _.chunk(transactionHashes, 50);
+
+  let Web3 = require('web3');
+  let web3 = new Web3(new Web3.providers.HttpProvider('http://127.0.0.1:9595'));
+
+  let getInvalidTransactionHashes = (hashes: string[]): Promise<any> => {
+    let self = this;
+    return new Promise((resolve, reject) => {
+      let invalidHashes: string[] = _.reject(hashes, (h) => { return web3.eth.getTransaction(h); });
+      log.info(`found ${_.size(invalidHashes)} new invalid hashes`);
+      resolve(invalidHashes);
+    });
+  };
+
+  let invalidHashes: string[] = [];
+  _.each(transactionHashChunks, (chunk: string[]) => {
+    getInvalidTransactionHashes(chunk).then((newInvalidHashes: string[]) => {
+      invalidHashes = invalidHashes.concat(newInvalidHashes);
+    });
+  });
+
+  _.each(dataManipulator.users, (u) => {
+    _.each(u.transactions || {}, (t, hash) => {
+      if (_.includes(invalidHashes, hash)) {
+        t.invalid = true;
+        u.invalid = true;
+      }
+    });
+  });
+
+
 });
