@@ -272,7 +272,7 @@ export class DataManipulator {
         self.users = {};
         lastAddress = '0x';
       }
-      let batchSize = 5000;
+      let batchSize = 100;
 
       log.info(`retrieving users with address ${lastAddress + '-'} through 9x...`);
       self.ref("/users").orderByChild('wallet/address').limitToFirst(batchSize).startAt(lastAddress + '-').endAt("9x").once("value", (snapshot: firebase.database.DataSnapshot) => {

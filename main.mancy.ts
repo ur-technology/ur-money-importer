@@ -12,21 +12,47 @@ let log = {
   setDefaultLevel: (x) => {}
 }; // couldn't get loglevel to work in Mancy, so faking it this way
 
+dotenv.config(); // if running on local machine, load config vars from .env file, otherwise these come from heroku
+
+log.setDefaultLevel(process.env.LOG_LEVEL || "info")
+
+log.info(`starting with NODE_ENV ${process.env.NODE_ENV} and FIREBASE_PROJECT_ID ${process.env.FIREBASE_PROJECT_ID}`);
+
+let serviceAccount = require(`./serviceAccountCredentials.${process.env.FIREBASE_PROJECT_ID}.json`);
+let admin = require("firebase-admin");
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+  databaseURL: `https://${process.env.FIREBASE_PROJECT_ID}.firebaseio.com`
+});
+
+
 class DataManipulator {
   env: any;
   db: any;
   auth: any;
   users: any;
+  disabledUsers: any[];
+  nonDisabledUsers: any[];
   usersWithBonuses: any[];
+  usersWithoutBonuses: any[];
+  blockedUsers: any[];
+  announcementBeingProcessedUsers: any[];
+  readyForAnnouncementUsers: any[];
+  otherUsers: any[];
   stop: boolean;
+  twilioLookupsClient: any;
 
   constructor(env: any, db: any, auth: any) {
     this.env = env;
     this.db = db;
     this.auth = auth;
     _.uniqBy = require('lodash.uniqby');
-    // _.keyBy = require('lodash.keyby');
-    // _.intersectionBy = require('lodash.intersectionby');
+    // file smallUsers.json was generated with the following command:
+    //   jq '.users | with_entries(del(.value.chats,.value.chatSummaries, .value.transactions, .value.downlineUsers, .value.events, .value.registration.verificationArgs, .value.registration.verificationResult))' 2017-03-25T01-25-03Z_ur-money-production_data.json > smallUsers.json
+
+    this.users = require('./smallUsers.json');
+    _.each(this.users, (u, userId) => { u.userId = userId; });
+    log.info(`total users retrieved: ${_.size(this.users)}`);
   }
 
   private ref(path: string) {
@@ -164,18 +190,32 @@ class DataManipulator {
     return this.isBlocked(sponsor);
   }
 
-  private newSponsor(u: any): any {
-    if (!this.isBlocked(u)) {
-      return undefined;
-    }
+  private unblockUsers() {
+    // BUT...need to make sure that unblocking one doesn't obviate the need to unblock others
+    // sort self.blockedUsers by dowline level
 
-    let currentUser: any = u;
-    while (true) {
-      currentUser = this.getSponsor(currentUser);
-      if (this.walletEnabled(currentUser) && !this.isBlocked(currentUser)) {
-        return currentUser;
+    let reassigned = 0;
+    let notReassigned = 0;
+
+    _.each(self.users, (u, uid) => {
+      if (_.isBlocked(u)) {
+        let newSponsor = _.find(this.uplineUsers(u), (uplineUser, uplineUserId) => {
+          return this.walletEnabled(uplineUser);
+        });
+        if (newSponsor) {
+          // save old sponsor
+
+          // set new sponsor
+          reassigned++;
+        } else {
+          notReassigned++;
+        }
       }
-    }
+    });
+
+    log.info(`${reassigned} blocked users reassigned`);
+    log.info(`${notReassigned} blocked users not reassigned`);
+
   }
 
   private blockedUsers(): any[] {
@@ -270,154 +310,90 @@ class DataManipulator {
     });
   }
 
-  kickOffUser(user: any) {
-    let users = [user];
-    users = users.concat(this.downlineUsers(u));
-    _.each(users, (u) => {
-      this.userRef(u).update({disabled: true});
-      this.auth.deleteUser(u.userId)
+  lookupCarrier(phone: string): Promise<any> {
+    let self = this;
+    return new Promise((resolve, reject) => {
+      if (!self.twilioLookupsClient) {
+        let twilio = require('twilio');
+        self.twilioLookupsClient = new twilio.LookupsClient(self.env.TWILIO_ACCOUNT_SID, self.env.TWILIO_AUTH_TOKEN);
+      }
+      self.twilioLookupsClient.phoneNumbers(phone).get({
+        type: 'carrier'
+      }, function(error: any, number: any) {
+        if (error) {
+          reject(`error looking up carrier: ${error.message}`);
+          return;
+        }
+        resolve({
+          name: (number && number.carrier && number.carrier.name) || "Unknown",
+          type: (number && number.carrier && number.carrier.type) || "Unknown"
+        });
+      });
     });
   }
 
-  loadUsers(lastKey?: string): Promise<any> {
+  disableAndSignOutUser(u: any) {
+    this.userRef(u).update({disabled: true});
+    this.auth.deleteUser(u.userId)
+  }
+
+  uplineUsers(u: any) {
+    let upline: any[] = [];
+    let currentUser: any = u;
+    while(currentUser.sponsor) {
+      currentUser = this.getSponsor(currentUser);
+      upline.push(currentUser);
+    }
+    return upline;
+  }
+
+  displayStats() {
     let self = this;
-    return new Promise((resolve, reject) => {
-      if (!lastKey) {
-        self.users = {};
-        lastKey = '';
+    self.disabledUsers = _.filter(self.users, 'disabled');
+    self.nonDisabledUsers = _.reject(self.users, 'disabled');
+    log.info(`1.1 disabled users: ${_.size(self.disabledUsers)}`);
+    log.info(`1.2 nonDisabled users: ${_.size(self.nonDisabledUsers)}`);
+
+    self.usersWithBonuses = _.filter(self.nonDisabledUsers, 'wallet.announcementTransaction.blockNumber');
+    self.usersWithoutBonuses = _.reject(self.nonDisabledUsers, 'wallet.announcementTransaction.blockNumber');
+    log.info(`1.2.1 usersWithBonuses: ${_.size(self.usersWithBonuses)}`);
+    log.info(`1.2.2 usersWithoutBonuses: ${_.size(self.usersWithoutBonuses)}`);
+
+    self.blockedUsers = _.filter(self.usersWithoutBonuses, (u: any) => { return self.isBlocked(u); });
+    log.info(`1.2.2.1 blockedUsers: ${_.size(self.blockedUsers)}`);
+
+    self.announcementBeingProcessedUsers = _.filter(self.usersWithoutBonuses, (u: any) => { return !self.isBlocked(u) && self.announcementBeingProcessed(u); });
+    log.info(`1.2.2.2 announcementBeingProcessedUsers: ${_.size(self.announcementBeingProcessedUsers)}`);
+
+    self.readyForAnnouncementUsers = _.filter(self.usersWithoutBonuses, (u: any) => { return !self.isBlocked(u) && !self.announcementBeingProcessed(u) && self.readyForAnnouncement(u); });
+    log.info(`1.2.2.3 readyForAnnouncementUsers: ${_.size(self.readyForAnnouncementUsers)}`);
+
+    self.otherUsers = _.filter(self.usersWithoutBonuses, (u: any) => { return !self.isBlocked(u) && !self.announcementBeingProcessed(u) && !self.readyForAnnouncement(u); });
+    log.info(`1.2.2.4 otherUsers: ${_.size(self.otherUsers)}`);
+  }
+
+  incorrectDownlineLevels() {
+    return _.filter(this.users, (u: any, uid: string) => {
+      return u.downlineLevel !== this.uplineUsers(u).length + 1;
+    });
+  }
+
+  fixDownlineLevels() {
+    let self = this;
+    let i = 0;
+    _.each(self.users, (u: any, uid: string) => {
+      let upline: any[] = self.uplineUsers(u);
+      if (u.downlineLevel !== upline.length + 1) {
+        if (i++ % 1000 === 0) {
+          log.info(`i: ${i}`);
+        }
+        self.userRef(u).update({downlineLevel: upline.length + 1 });
       }
-      let batchSize = 5000;
-
-      log.info(`retrieving users with address ${lastKey + '-'} through zzzzzzz...`);
-      self.ref("/users").orderByKey().limitToFirst(batchSize).startAt(lastKey + '-').endAt("zzzzzzz").once("value", (snapshot: firebase.database.DataSnapshot) => {
-        let newUsers = _.mapValues(snapshot.val() || {}, (user, userId) => {
-          return _.merge(_.pick(user, ['name', 'email', 'phone', 'wallet', 'sponsor', 'disabled', 'registration', 'transactions', 'countryCode']), {userId: userId});
-        });
-
-        let numNewUsers = _.size(newUsers);
-        log.info(`  ...retrieved ${numNewUsers} users`);
-
-        if (numNewUsers > 0) {
-          let newUsersSortedByAddress = _.sortBy(newUsers, 'userId');
-          let firstKey: string = (<any>_.first(newUsersSortedByAddress)).userId;
-          lastKey = (<any>_.last(newUsersSortedByAddress)).userId;
-          log.info(`  ...first address: ${firstKey}`);
-          log.info(`  ...last address: ${lastKey}`);
-        }
-
-        _.extend(self.users, newUsers);
-
-        if (numNewUsers === batchSize) {
-          // need to retrieve more users
-          self.loadUsers(lastKey).then(() => {
-            resolve();
-          });
-        } else {
-          // all done retrieving users
-          log.info(`total users retrieved: ${_.size(self.users)}`);
-
-          // global.gc();
-          resolve();
-        }
-      });
     });
   }
 }
 
-dotenv.config(); // if running on local machine, load config vars from .env file, otherwise these come from heroku
-
-log.setDefaultLevel(process.env.LOG_LEVEL || "info")
-
-log.info(`starting with NODE_ENV ${process.env.NODE_ENV} and FIREBASE_PROJECT_ID ${process.env.FIREBASE_PROJECT_ID}`);
-
-let serviceAccount = require(`./serviceAccountCredentials.${process.env.FIREBASE_PROJECT_ID}.json`);
-let admin = require("firebase-admin");
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  databaseURL: `https://${process.env.FIREBASE_PROJECT_ID}.firebaseio.com`
-});
-
 let dataManipulator = new DataManipulator(process.env, admin.database(), admin.auth());
-dataManipulator.loadUsers().then(() => {
-  log.info("all done loading users!");
+dataManipulator.displayStats();
 
-  // let disabledUsers = _.filter(self.users, 'disabled');
-  // let nonDisabledUsers = _.reject(self.users, 'disabled');
-  // log.info(`1.1 disabled users: ${_.size(disabledUsers)}`);
-  // log.info(`1.2 nonDisabled users: ${_.size(nonDisabledUsers)}`);
-  //
-  // self.usersWithBonuses = _.filter(nonDisabledUsers, 'wallet.announcementTransaction.blockNumber');
-  // let usersWithoutBonuses = _.reject(nonDisabledUsers, 'wallet.announcementTransaction.blockNumber');
-  // log.info(`1.2.1 usersWithBonuses: ${_.size(self.usersWithBonuses)}`);
-  // log.info(`1.2.2 usersWithoutBonuses: ${_.size(usersWithoutBonuses)}`);
-  //
-  // let blockedUsers: any = _.filter(usersWithoutBonuses, (u: any) => { return self.isBlocked(u); });
-  // let announcementBeingProcessedUsers: any = _.filter(usersWithoutBonuses, (u: any) => { return !self.isBlocked(u) && self.announcementBeingProcessed(u); });
-  // let readyForAnnouncementUsers: any = _.filter(usersWithoutBonuses, (u: any) => { return !self.isBlocked(u) && self.readyForAnnouncement(u); });
-  // let otherUsers: any = _.filter(usersWithoutBonuses, (u: any) => { return !self.isBlocked(u) && self.readyForAnnouncement(u); });
-  // log.info(`1.2.2.1 blockedUsers: ${_.size(blockedUsers)}`);
-  // log.info(`1.2.2.2 announcementBeingProcessedUsers: ${_.size(announcementBeingProcessedUsers)}`);
-  // log.info(`1.2.2.3 readyForAnnouncementUsers: ${_.size(readyForAnnouncementUsers)}`);
-
-  // let usersWithSentTransactions, sentTransactions, reusedToAddresses, suspects;
-  //
-  // usersWithSentTransactions = _.filter(dataManipulator.usersWithBonuses, (u) => {
-  //   return _.some(u.transactions || {}, {type: 'sent'});
-  // });
-  //
-  // sentTransactions = _.flatten(
-  //   _.map(usersWithSentTransactions, (u) => {
-  //     return _.uniqBy(_.filter(u.transactions, {type: 'sent'}), 'urTransaction.to');
-  //   })
-  // );
-  //
-  // reusedToAddresses = _.keys(
-  //   _.pick(
-  //     _.groupBy(sentTransactions, 'urTransaction.to'),
-  //     (dups, to) => { return dups.length > 2; }
-  //   )
-  // );
-  // suspects = _.filter(dataManipulator.usersWithBonuses, (u) => {
-  //   let addresses = _.map(_.filter(u.transactions || {}, {type: 'sent'}), 'urTransaction.to');
-  //   return !_.isEmpty(_.intersection(addresses, reusedToAddresses));
-  // });
-  //
-  // log.info(`users who sent ur=${_.size(usersWithSentTransactions)}`);
-  // log.info(`suspects=${_.size(suspects)}`);
-
-  // let transactionHashes = _.flatten(
-  //   _.uniq(_.flatten(
-  //     _.map(dataManipulator.users, (u) => { return _.keys(u.transactions || {}); })
-  //   ))
-  // );
-  // let transactionHashChunks = _.chunk(transactionHashes, 50);
-  //
-  // let Web3 = require('web3');
-  // let web3 = new Web3(new Web3.providers.HttpProvider('http://127.0.0.1:9595'));
-  //
-  // let getInvalidTransactionHashes = (hashes: string[]): Promise<any> => {
-  //   let self = this;
-  //   return new Promise((resolve, reject) => {
-  //     let invalidHashes: string[] = _.reject(hashes, (h) => { return web3.eth.getTransaction(h); });
-  //     log.info(`found ${_.size(invalidHashes)} new invalid hashes`);
-  //     resolve(invalidHashes);
-  //   });
-  // };
-  //
-  // let invalidHashes: string[] = [];
-  // _.each(transactionHashChunks, (chunk: string[]) => {
-  //   getInvalidTransactionHashes(chunk).then((newInvalidHashes: string[]) => {
-  //     invalidHashes = invalidHashes.concat(newInvalidHashes);
-  //   });
-  // });
-  //
-  // _.each(dataManipulator.users, (u) => {
-  //   _.each(u.transactions || {}, (t, hash) => {
-  //     if (_.includes(invalidHashes, hash)) {
-  //       t.invalid = true;
-  //       u.invalid = true;
-  //     }
-  //   });
-  // });
-
-});
+dataManipulator.incorrectDownlineLevels();
