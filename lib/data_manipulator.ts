@@ -3,21 +3,41 @@ import * as _ from 'lodash';
 import * as log from 'loglevel';
 import {BigNumber} from 'bignumber.js';
 import {sprintf} from 'sprintf-js';
+import {ManualIDVerifier} from './manual';
 
 export class DataManipulator {
   env: any;
   db: any;
   auth: any;
   users: any;
-  stop: boolean;
+  disabledUsers: any[];
+  nonDisabledUsers: any[];
+  usersWithBonuses: any[];
+  usersWithoutWallets: any[];
+  usersWithWalletsButNoBonuses: any[];
+
+
+  usersWithDocsPending: any[];
+  usersWithReviewPending: any[];
+  approvedUsersWithAnnouncementPending: any[];
+  otherUsers: any[];
+
+  twilioLookupsClient: any;
 
   constructor(env: any, db: any, auth: any) {
     this.env = env;
     this.db = db;
     this.auth = auth;
-    // _.uniqBy = require('lodash.uniqby');
-    // _.keyBy = require('lodash.keyby');
-    // _.intersectionBy = require('lodash.intersectionby');
+    // file smallUsers.json was generated with the following command:
+    //   jq '.users | with_entries(del(.value.chats,.value.chatSummaries, .value.transactions, .value.events, .value.registration.verificationArgs, .value.registration.verificationResult))' ./data/ur-money-production_data.json > ./data/smallUsers.json
+
+    this.users = require('../data/smallUsers.json');
+    _.each(this.users, (u, userId) => {
+      u.userId = userId;
+      u.state = this.userState(u);
+    });
+
+    log.info(`loaded ${_.size(this.users)} users`);
   }
 
   private ref(path: string) {
@@ -30,10 +50,6 @@ export class DataManipulator {
 
   private getSponsor(u: any) {
     return this.users[u.sponsor && u.sponsor.userId];
-  }
-
-  private hasSponsor(u: any) {
-    return !!u.sponsor && !!u.sponsor.userId;
   }
 
   private directReferrals(u: any) {
@@ -88,10 +104,6 @@ export class DataManipulator {
     }
   }
 
-  private hasWallet(u: any): boolean {
-    return !!u.wallet && !!u.wallet.address;
-  }
-
   private setSponsorToEiland(u: any) {
     let eiland: any = _.find(this.users, { email: 'eiland@ur.technology' });
     let sponsorInfo: any = _.pick(eiland, ['name', 'profilePhotoUrl', 'userId']);
@@ -99,84 +111,164 @@ export class DataManipulator {
     this.userRef(u).update({ sponsor: sponsorInfo });
   }
 
-  private blocker(u: any): any {
-    if (u.email === 'eiland@ur.technology' || u.email === 'jreitano@ur.technology') {
-      log.info(`${u.email}: hit the top!`);
-      return undefined;
-    }
-    let sponsor: any = this.getSponsor(u);
-    if (!sponsor) {
-      log.info(`${u.email}: has no sponsor`);
-      return undefined;
-    }
-    if (sponsor.wallet && sponsor.wallet.address && !sponsor.diabled) {
-      log.info(`${u.email}: is the sponsor ${sponsor.email} blocked?`);
-      return this.blocker(sponsor);
-    } else {
-      log.info(`${u.email}: the sponsor ${sponsor.email} is a blocker`);
-      return sponsor;
-    }
-  }
-
   private isTopUser(u: any): boolean {
     return u.email === 'jreitano@ur.technology';
   }
 
-  private walletEnabled(u: any): boolean {
-    return this.hasWallet(u) && !u.disabled && (this.hasSponsor(u) || this.isTopUser(u));
-  }
+  private userState(u: any): string {
+    if (!this.isTopUser(u) && !u.sponsor) {
+      return 'missing-sponsor';
+    } else if (!u.wallet || !u.wallet.address) {
+      return 'missing-wallet';
+    } if (u.disabled) {
+      return 'disabled'
+    } if (u.fraudSuspected) {
+      return 'fraud-suspected'
+    } else if (u.wallet.announcementTransaction && u.wallet.announcementTransaction.hash && u.wallet.announcementTransaction.blockNumber) {
+      return 'announcement-confirmed';
+    } else if (u.wallet.announcementTransaction && u.wallet.announcementTransaction.hash) {
+      return 'waiting-for-announcement-to-be-confirmed';
+    } else if (!u.signUpBonusApproved && !(u.idUploaded && u.selfieMatched)) {
+      return 'waiting-for-docs';
+    } else if (!u.signUpBonusApproved) {
+      return 'waiting-for-review';
+    } else if (!u.sponsor.announcementTransactionConfirmed) {
+      let s = this.sponsorState(u);
+      switch(s) {
+        case 'missing-sponsor':
+        case 'missing-wallet':
+        case 'disabled':
+        case 'fraud-suspected':
+        case 'waiting-for-docs':
+        case 'blocked-by-upline':
+          return `blocked-by-upline`
 
-  private announcementConfirmed(u: any): boolean {
-    return !!u.wallet && !!u.wallet.announcementTransaction && !!u.wallet.announcementTransaction.hash && !!u.wallet.announcementTransaction.blockNumber;
-  }
+        case 'waiting-for-announcement-confirmation':
+        case 'waiting-for-review':
+        case 'waiting-for-announcement-to-be-queued':
+        case 'waiting-for-upline-processing':
+          return 'waiting-for-upline-processing';
 
-  private announcementBeingProcessed(u: any): boolean {
-    return !!u.wallet && !!u.wallet.announcementTransaction && !!u.wallet.announcementTransaction.hash && !u.wallet.announcementTransaction.blockNumber
-  }
-
-  private readyForAnnouncement(u: any): boolean {
-    return this.walletEnabled(u) && !u.wallet.announcementTransaction;
-  }
-
-  private isBlocked(u: any): boolean {
-    if (!this.readyForAnnouncement(u)) {
-      return false;
+        default:
+          return `unexpected-sponsor-state: ${s}`;
+      }
+    } else {
+      return 'waiting-for-announcement-to-be-queued';
     }
-
-    if (u.email === 'eiland@ur.technology' || u.email === 'jreitano@ur.technology') {
-      return false;
-    }
-
-    let sponsor: any = this.getSponsor(u);
-    if (!sponsor || !sponsor.wallet || !sponsor.wallet.address || sponsor.disabled) {
-      return true;
-    }
-
-    return this.isBlocked(sponsor);
   }
 
-  private newSponsor(u: any): any {
-    if (!this.isBlocked(u)) {
+  private sponsorState(u: any): any {
+    let sponsor = this.getSponsor(u);
+    return sponsor && this.userState(sponsor);
+  }
+
+  private rootUser(u: any): any {
+    if (_.includes(['blocked-by-upline', 'waiting-for-upline-processing'], this.userState(u))) {
+      return this.rootUser(this.getSponsor(u));
+    } else {
+      return u;
+    }
+  }
+
+  private rootState(u: any): any {
+    return this.userState(this.rootUser(u));
+  }
+
+  private blocker(u: any): any {
+    if (this.userState(u) !== 'blocked') {
       return undefined;
     }
 
-    let currentUser: any = u;
-    while (true) {
-      currentUser = this.getSponsor(currentUser);
-      if (this.walletEnabled(currentUser) && !this.isBlocked(currentUser)) {
-        return currentUser;
+    let upline = this.uplineUsers(u);
+    return _.find(this.uplineUsers(u), (up) => {
+      return this.userState(up) !== 'blocked';
+    });
+  }
+
+  fixDownlineInfo() {
+    let self = this;
+    let updatedDownlineLevels = 0;
+    let updatedDownlineUsers = 0;
+    let updatedDownlineSizes = 0;
+    _.each(self.users, (u) => {
+      u.newDownlineSize = 0;
+      u.newDownlineUsers = {};
+    });
+    _.each(self.users, (u) => {
+      let upline: any[] = self.uplineUsers(u);
+      u.newDownlineLevel = upline.length + 1;
+      if (upline[0]) {
+        upline[0].newDownlineUsers[u.userId] = _.pick(u, ['name', 'profilePhotoUrl']);
       }
-    }
+      _.each(upline, (uplineUser) => { uplineUser.newDownlineSize++; });
+    });
+    _.each(self.users, (u) => {
+      if (u.newDownlineLevel !== u.downlineLevel) {
+        u.downlineLevel = u.newDownlineLevel;
+        self.userRef(u).update({downlineLevel: u.downlineLevel});
+        updatedDownlineLevels++;
+      }
+
+      if (!_.isEqual(u.newDownlineUsers, u.downlineUsers || {})) {
+        u.downlineUsers = u.newDownlineUsers;
+        self.userRef(u).update({downlineUsers: u.downlineUsers});
+        updatedDownlineUsers++;
+      }
+
+      if (u.newDownlineSize !== u.downlineSize) {
+        u.downlineSize = u.newDownlineSize;
+        self.userRef(u).update({downlineSize: u.downlineSize});
+        updatedDownlineSizes++;
+      }
+    });
+
+    log.info(`updatedDownlineLevels=${updatedDownlineLevels}`);
+    log.info(`updatedDownlineUsers=${updatedDownlineUsers}`);
+    log.info(`updatedDownlineSizes=${updatedDownlineSizes}`);
   }
 
-  private blockedUsers(): any[] {
-    return _.filter(this.users, this.isBlocked);
-  }
+  unblockUsers() {
+    let self = this;
+    let reassigned = 0;
 
-  private isAnnounceable(u: any): boolean {
-    return this.readyForAnnouncement(u) && !this.blocker(u);
-  }
+    let blockedUsers: any[] = _.filter(this.users, (u) => { return this.userState(u) === 'blocked-by-upline' && _.includes(['missing-wallet','disabled'], this.sponsorState(u)) });
+    let numBlocked = _.size(blockedUsers);
 
+    _.each(blockedUsers, (u, uid) => {
+      let newSponsor = _.find(self.uplineUsers(self.getSponsor(u)), (uplineUser, index) => {
+        return index > 0 && _.includes([
+          'announcement-confirmed', 'waiting-for-announcement-confirmation', 'waiting-for-review',
+          'waiting-for-docs',
+          'blocked-by-upline', 'waiting-for-upline-processing', 'waiting-for-announcement-to-be-queued'
+        ], this.userState(uplineUser));
+
+      });
+      if (newSponsor) {
+        u.oldSponsor = _.merge(_.clone(u.sponsor), { replacedAt: firebase.database.ServerValue.TIMESTAMP });
+        u.newSponsor = _.pick(newSponsor, ['userId', 'name', 'profilePhotoUrl']);
+        u.newSponsor.announcementTransactionConfirmed = !!newSponsor.wallet &&
+            !!newSponsor.wallet.announcementTransaction &&
+            !!newSponsor.wallet.announcementTransaction.blockNumber &&
+            !!newSponsor.wallet.announcementTransaction.hash;
+      }
+    });
+
+    _.each(self.users, (u, uid) => {
+      if (u.newSponsor) {
+        u.sponsor = u.newSponsor;
+        self.userRef(u).update({ oldSponsor: u.oldSponsor, sponsor: u.sponsor}).then(() => {
+          reassigned++;
+          log.info(`reassigned record ${reassigned}`);
+          log.info(`u.userId: ${u.userId}, u.oldSponsor.userId: ${u.oldSponsor.userId}, u.newSponsor.userId: ${u.newSponsor.userId}`);
+        });
+      }
+    });
+
+    self.fixDownlineInfo();
+
+    log.info(`${numBlocked} blocked users`);
+    log.info(`${reassigned} blocked users were reassigned`);
+  }
 
   private referralUsers(u: any): any[] {
     return _.filter(this.users, (r: any) => {
@@ -185,8 +277,11 @@ export class DataManipulator {
   }
 
   private downlineUsers(u: any): any[] {
-    let referrals: any[] = this.referralUsers(u);
-    return referrals.concat(_.flatten(_.map(referrals, this.downlineUsers)));
+    if (!u.calculatedDownlineUsers) {
+      let referrals: any[] = this.referralUsers(u);
+      u.calculatedDownlineUsers = referrals.concat(_.flatten(_.map(referrals, (r) => { return this.downlineUsers(r); })));
+    }
+    return u.calculatedDownlineUsers;
   }
 
   private convertPushIdToTimestamp(id: string): number {
@@ -203,8 +298,8 @@ export class DataManipulator {
   private clearOldPhoneAuthTasks(): Promise<any[]> {
     let self = this;
     return new Promise((resolve, reject) => {
-      let tasksRef = firebase.database().ref(`/phoneAuthQueue/tasks`);
-      tasksRef.once('value', (snapshot) => {
+      let tasksRef = self.ref(`/phoneAuthQueue/tasks`);
+      tasksRef.once('value', (snapshot: firebase.database.DataSnapshot) => {
         let phoneAuthTasks: any = snapshot.val() || {}
         _.each(phoneAuthTasks, (t, tid) => { t.taskId = tid; });
         log.info('done loading phoneAuthTasks');
@@ -243,87 +338,188 @@ export class DataManipulator {
     log.info(`nextGen=${_.size(nextGen)}`);
   }
 
-  private announceUsers() {
-    let announceableUsers = _.filter(this.users, this.isAnnounceable);
-    _.each(announceableUsers, (u: any) => {
-      firebase.database().ref(`/identityAnnouncementQueue/tasks/${u.userId}`).set({ userId: u.userId });
-    });
-    log.info(`announced ${announceableUsers.length} users`);
-  }
-
-  private loadIdentityAnnouncementTasks() {
-    firebase.database().ref(`/identityAnnouncementQueue/tasks`).once('value', (snapshot) => {
+  announceUsers() {
+    this.ref(`/identityAnnouncementQueue/tasks`).once('value', (snapshot: firebase.database.DataSnapshot) => {
       let identityAnnouncementTasks: any = snapshot.val() || {}
-      _.each(identityAnnouncementTasks, (t, tid) => { t.taskId = tid; });
-      log.info('done loading identityAnnouncementTasks');
-      log.info('grouped by state', _.groupBy(identityAnnouncementTasks, '_state'));
-      log.info('grouped by error', _.groupBy(identityAnnouncementTasks, '_error_details.error'));
+      // _.each(identityAnnouncementTasks, (t, tid) => { t.taskId = tid; });
+      // log.info('grouped by state', _.groupBy(identityAnnouncementTasks, '_state'));
+      // log.info('grouped by error', _.groupBy(identityAnnouncementTasks, '_error_details.error'));
+
+      let alreadyAnnouncedUserIds: any[] = _.map(_.reject(identityAnnouncementTasks, '_state'), 'userId');
+      log.info(`count of alreadyAnnouncedUserIds: ${_.size(alreadyAnnouncedUserIds)}`);
+      log.info(`alreadyAnnouncedUserIds: ${alreadyAnnouncedUserIds}`);
+
+      let announceableUsers: any[] = _.filter(this.users, (u: any) => {
+        return this.userState(u) === 'waiting-for-announcement-to-be-queued' && !_.includes(alreadyAnnouncedUserIds, u.userId);
+      });
+
+      _.each(announceableUsers, (u: any) => {
+        log.info(`url=${this.userRef(u).toString()}`);
+        this.ref('/walletCreatedQueue/tasks').push({ userId: u.userId });
+      });
+      log.info(`number of users announced: ${_.size(announceableUsers)}`);
     });
   }
 
-  private simplifyUser(u: any) {
-    let simplifiedUser = _.pick(u, ['firstName', 'lastName', 'email', 'phone', 'sponsor', 'wallet']);
-  }
-
-  loadUsers(lastAddress?: string): Promise<any> {
+  lookupCarrier(phone: string): Promise<any> {
     let self = this;
     return new Promise((resolve, reject) => {
-      if (!lastAddress) {
-        self.users = {};
-        lastAddress = '0x';
+      if (!self.twilioLookupsClient) {
+        let twilio = require('twilio');
+        self.twilioLookupsClient = new twilio.LookupsClient(self.env.TWILIO_ACCOUNT_SID, self.env.TWILIO_AUTH_TOKEN);
       }
-      let batchSize = 100;
-
-      log.info(`retrieving users with address ${lastAddress + '-'} through 9x...`);
-      self.ref("/users").orderByChild('wallet/address').limitToFirst(batchSize).startAt(lastAddress + '-').endAt("9x").once("value", (snapshot: firebase.database.DataSnapshot) => {
-        let newUsers = _.mapValues(snapshot.val() || {}, (user, userId) => {
-          return _.merge(_.pick(user, ['name', 'email', 'phone', 'wallet', 'sponsor', 'disabled', 'registration']), {userId: userId});
-        });
-
-        let numNewUsers = _.size(newUsers);
-        log.info(`  ...retrieved ${numNewUsers} users`);
-
-        if (numNewUsers > 0) {
-          let newUsersSortedByAddress = _.sortBy(newUsers, 'wallet.address');
-          let firstAddress: string = (<any>_.first(newUsersSortedByAddress)).wallet.address;
-          lastAddress = (<any>_.last(newUsersSortedByAddress)).wallet.address;
-          log.info(`  ...first address: ${firstAddress}`);
-          log.info(`  ...last address: ${lastAddress}`);
+      self.twilioLookupsClient.phoneNumbers(phone).get({
+        type: 'carrier'
+      }, function(error: any, number: any) {
+        if (error) {
+          reject(`error looking up carrier: ${error.message}`);
+          return;
         }
+        resolve({
+          name: (number && number.carrier && number.carrier.name) || "Unknown",
+          type: (number && number.carrier && number.carrier.type) || "Unknown"
+        });
+      });
+    });
+  }
 
-        _.extend(self.users, newUsers);
+  disableAndSignOutUser(u: any) {
+    this.userRef(u).update({disabled: true});
+    this.auth.deleteUser(u.userId)
+  }
 
-        if (numNewUsers < batchSize) {
+  uplineUsers(u: any) {
+    let upline: any[] = [];
+    let currentUser: any = u;
+    while(currentUser.sponsor) {
+      currentUser = this.getSponsor(currentUser);
+      upline.push(currentUser);
+    }
+    return upline;
+  }
 
-          log.info(`total users retrieved: ${_.size(self.users)}`);
 
-          let disabledUsers = _.filter(self.users, 'disabled');
-          let nonDisabledUsers = _.reject(self.users, 'disabled');
-          log.info(`1.1 disabled users: ${_.size(disabledUsers)}`);
-          log.info(`1.2 nonDisabled users: ${_.size(nonDisabledUsers)}`);
+  displayStats() {
+    let groups: any;
 
-          let usersWithBonuses = _.filter(nonDisabledUsers, 'wallet.announcementTransaction.blockNumber');
-          let usersWithoutBonuses = _.reject(nonDisabledUsers, 'wallet.announcementTransaction.blockNumber');
-          log.info(`1.2.1 usersWithBonuses: ${_.size(usersWithBonuses)}`);
-          log.info(`1.2.2 usersWithoutBonuses: ${_.size(usersWithoutBonuses)}`);
+    groups = _.groupBy(this.users, 'state');
+    _.each(groups, (group, state) => {
+      log.info(`  state: ${state}, count: ${_.size(group)}`);
+    });
 
-          let blockedUsers: any = _.filter(usersWithoutBonuses, (u: any) => { return self.isBlocked(u); });
-          let announcementBeingProcessedUsers: any = _.filter(usersWithoutBonuses, (u: any) => { return !self.isBlocked(u) && self.announcementBeingProcessed(u); });
-          let readyForAnnouncementUsers: any = _.filter(usersWithoutBonuses, (u: any) => { return !self.isBlocked(u) && self.readyForAnnouncement(u); });
-          let otherUsers: any = _.filter(usersWithoutBonuses, (u: any) => { return !self.isBlocked(u) && self.readyForAnnouncement(u); });
-          log.info(`1.2.2.1 blockedUsers: ${_.size(blockedUsers)}`);
-          log.info(`1.2.2.2 announcementBeingProcessedUsers: ${_.size(announcementBeingProcessedUsers)}`);
-          log.info(`1.2.2.3 readyForAnnouncementUsers: ${_.size(readyForAnnouncementUsers)}`);
+    let blockedUsers: any[], rootUsers: any[];
 
-          // global.gc();
-          resolve();
+    blockedUsers = groups['blocked-by-upline'];
+    rootUsers = _.uniq(_.map(blockedUsers, (u) => { return this.rootUser(u); }));
+    rootUsers = _.sortBy(rootUsers, (u) => { u.state = this.userState(u); return u.state });
+    log.info(`\nblocking users: ${_.size(rootUsers)}, number blocked: ${_.size(blockedUsers)}`);
+    _.each(rootUsers, (u) => { log.info(`  ${u.userId} / ${u.name} / ${u.email} / ${u.phone} / ${u.state}`); });
 
-        } else {
-          self.loadUsers(lastAddress).then(() => {
-            resolve();
-          })
+    blockedUsers = _.filter(blockedUsers, (u) => { return _.includes(['missing-wallet','disabled'], this.sponsorState(u)) });
+    log.info(`\nblocked users who should be moved: ${_.size(blockedUsers)}`);
+    _.each(blockedUsers, (u) => { log.info(`  ${u.userId} / ${u.name} / ${u.email} / ${u.phone} / ${u.state}`); });
+
+    blockedUsers = groups['waiting-for-upline-processing'];
+    rootUsers = _.uniq(_.map(blockedUsers, (u) => { return this.rootUser(u); }));
+    rootUsers = _.sortBy(rootUsers, 'state');
+    log.info(`\nkey users needing review or other processing: ${_.size(rootUsers)}, number blocked: ${_.size(blockedUsers)}`);
+    _.each(rootUsers, (u) => { log.info(`  ${u.userId} / ${u.name} / ${u.email} / ${u.phone} / ${u.state}`); });
+
+    blockedUsers = groups['fraud-suspected'];
+    log.info(`\nusers suspected of fraud: ${_.size(blockedUsers)}`);
+    _.each(blockedUsers, (u) => { log.info(`  ${u.userId} / ${u.name} / ${u.email} / ${u.phone} / ${u.state}`); });
+
+    // let confirmedUsers: any[] = _.filter(this.users, {state: 'announcement-confirmed'});
+    // let millisecondsPerDay = 1000 * 60 * 60 * 24;
+    // let usersLeft = _.size(confirmedUsers)
+    // _.each(confirmedUsers, (u) => {
+    //   let hash: number = u.wallet.announcementTransaction.hash;
+    //   this.userRef(u).child(`transactions/${hash}/createdAt`).once('value', (snapshot: firebase.database.DataSnapshot) => {
+    //     let x: number = parseInt(snapshot.val());
+    //     u.dayCreated = x - ( x % millisecondsPerDay );
+    //     usersLeft--;
+    //     if (usersLeft % 1000 === 0) {
+    //       log.info(`processed 2000 users`);
+    //     }
+    //     if (usersLeft === 0) {
+    //       let groups = _.groupBy(confirmedUsers, 'dayCreated');
+    //       _.each(groups, (g: any[], dayCreated: string) => {
+    //         let minBlockNumber: any = _.min(_.map(g, 'wallet.announcementTransaction.blockNumber'));
+    //         log.info(`${dayCreated} ;${dayCreated ? new Date(parseInt(dayCreated)) : 'none'};${minBlockNumber};${_.size(g)}`);
+    //       });
+    //     }
+    //   });
+    // });
+
+  }
+
+
+  openMissingFreshdeskTickets() {
+    let usersWithReviewPending: any[] = _.filter(this.users, (u) => { return this.userState(u) === 'waiting-for-review'; });
+    usersWithReviewPending = _.reject(usersWithReviewPending, 'freshdeskUrl');
+
+    log.info(`about to open ${_.size(usersWithReviewPending)} tickets`);
+    // _.each(usersWithReviewPending, (u) => { log.info(`  ${u.userId} / ${u.name} / ${u.email} / ${u.phone} / ${u.state} / ${u.downlineSize} / ${u.freshdeskUrl}`); });
+
+    // let manualIDVerifier: ManualIDVerifier = new ManualIDVerifier( this.env, this.db );
+    // _.each(usersWithReviewPending, (u: any) => {
+    //   manualIDVerifier.openFreshdeskTicketIfNecessary(u.userId);
+    // });
+  }
+
+  checkTransactions() {
+    let potentiallyInvalidTransactions: any[] = require('../data/potentiallyInvalidTransactions.json');
+
+    let Web3 = require('web3');
+    let web3 = new Web3(new Web3.providers.HttpProvider('http://127.0.0.1:9595'));
+
+    log.info(`about to check ${_.size(potentiallyInvalidTransactions)} potentially invalid hashes`);
+
+    let chunk = _.slice(potentiallyInvalidTransactions, 0, 5000);
+    let numLeft = _.size(chunk);
+    _.each(chunk, (p, index) => {
+      let ref = this.userRef({userId: p.userId}).child(`transactions/${p.hash}`);
+      log.info(`about to load fb transaction data at ${ref.toString()}`);
+      ref.once('value', (snapshot: firebase.database.DataSnapshot) => {
+        numLeft--;
+        if (snapshot.exists()) {
+          log.info(`found fb transaction data at ${ref.toString()}`);
+
+          log.info(`about to retrieve network transaction data ${p.hash}`);
+
+          let retrievedTransaction: any = web3.eth.getTransaction(p.hash);
+          if (retrievedTransaction) {
+            log.info(`network transaction data found -- skipping`);
+          } else {
+            log.info(`network transaction data NOT found`);
+            log.info(`removing fb transaction data`);
+            ref.remove();
+            log.info(`removed fb transaction data at ${ref.toString()}`);
+
+            ref = this.userRef({userId: p.userId}).child(`events/${p.hash}`);
+            ref.remove();
+            log.info(`removed fb event at ${ref.toString()}`);
+          }
+        }
+        if (numLeft === 0) {
+          log.info('did them all');
         }
       });
     });
   }
+
+  disableFraudulentUser(email: string) {
+    let matchedUsers: any[] = _.filter(this.users, {email: email});
+
+    let count = _.size(matchedUsers);
+    if (count === 0 || count > 1) {
+      log.info(`found ${count} users with email ${email}`);
+      return;
+    }
+
+    this.userRef(matchedUsers[0]).update({disabled: true, fraudSuspected: true}).then(() => {
+      log.info(`successfully disabled user with email ${email}`);
+    });
+  }
+
 }

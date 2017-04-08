@@ -3,14 +3,11 @@
 import * as dotenv from 'dotenv';
 import * as log from 'loglevel';
 import * as _ from 'lodash';
+import * as firebase from 'firebase';
 import {DataManipulator} from './data_manipulator';
 
-if (!process.env.NODE_ENV) {
-  dotenv.config(); // if running on local machine, load config vars from .env file, otherwise these come from heroku
-}
-
+dotenv.config();
 log.setDefaultLevel(process.env.LOG_LEVEL || "info")
-
 log.info(`starting with NODE_ENV ${process.env.NODE_ENV} and FIREBASE_PROJECT_ID ${process.env.FIREBASE_PROJECT_ID}`);
 
 let serviceAccount = require(`../serviceAccountCredentials.${process.env.FIREBASE_PROJECT_ID}.json`);
@@ -21,10 +18,18 @@ admin.initializeApp({
 });
 
 let dataManipulator = new DataManipulator(process.env, admin.database(), admin.auth());
-dataManipulator.loadUsers().then(() => {
-  log.info("all done!");
-  process.exit(0);
-})
+
+dataManipulator.disableFraudulentUser('xxx@example.com');
+
+dataManipulator.displayStats();
+
+dataManipulator.checkTransactions();
+
+// dataManipulator.unblockUsers();
+// dataManipulator.openMissingFreshdeskTickets();
+// dataManipulator.announceUsers();
+
+// log.info("all done!");
 
 process.on('SIGTERM', () => {
   log.info(`Exiting...`);
