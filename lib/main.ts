@@ -19,15 +19,16 @@ admin.initializeApp({
 
 let dataManipulator = new DataManipulator(process.env, admin.database(), admin.auth());
 
-dataManipulator.disableFraudulentUser('xxx@example.com');
 
 dataManipulator.displayStats();
 
-dataManipulator.checkTransactions();
-
+// dataManipulator.notifyUsers();
+// dataManipulator.fixSendUrTransactions();
 // dataManipulator.unblockUsers();
 // dataManipulator.openMissingFreshdeskTickets();
 // dataManipulator.announceUsers();
+// dataManipulator.disableFraudSuspectedUsers();
+// dataManipulator.disableFraudulentDownline('xxx@example.com');
 
 // log.info("all done!");
 

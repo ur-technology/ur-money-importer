@@ -15,6 +15,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "./node_modules/.bin/tsc --module commonjs --outDir build/ --noImplicitAny --sourceMap --target ES5 lib/*.ts && node build/main.js",
+    "generate": "FILE=`ls -1t ~/Downloads/2017-*_ur-money-production_data.json.gz | head -1 | xargs -n 1 basename | cut -f 1-2 -d.` && mv ~/Downloads/${FILE}.gz data/ && gunzip data/${FILE}.gz && cp data/${FILE} data/ur-money-production_data.json && jq '.users | with_entries(del(.value.chats,.value.chatSummaries, .value.transactions, .value.events, .value.registration.verificationArgs, .value.registration.verificationResult))' data/ur-money-production_data.json > data/smallUsers.json",
     "debug": "killall -9 node; ./node_modules/.bin/tsc --module commonjs --outDir build/ --noImplicitAny --sourceMap --target ES5 lib/*.ts && node --inspect --debug-brk --expose-gc build/main.js",
     "postinstall": "./node_modules/.bin/typings install"
   },
