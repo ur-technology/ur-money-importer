@@ -4,6 +4,7 @@ import * as log from 'loglevel';
 import {BigNumber} from 'bignumber.js';
 import {sprintf} from 'sprintf-js';
 import {ManualIDVerifier} from './manual';
+import * as moment from 'moment';
 
 export class DataManipulator {
   env: any;
@@ -37,8 +38,6 @@ export class DataManipulator {
       u.userId = userId;
       u.state = this.userState(u);
     });
-
-    log.info(`loaded ${_.size(this.users)} users`);
   }
 
   private ref(path: string) {
@@ -201,41 +200,34 @@ export class DataManipulator {
     let self = this;
     let reassigned = 0;
 
-    let blockedUsers: any[] = _.filter(this.users, (u) => { return this.userState(u) === 'blocked-by-upline' && _.includes(['missing-wallet', 'disabled'], this.sponsorState(u)) });
-    let numBlocked = _.size(blockedUsers);
-
+    let blockedUsers: any[] = _.filter(this.users, { state: 'blocked-by-upline' });
     _.each(blockedUsers, (u, uid) => {
-      let newSponsor = _.find(self.uplineUsers(self.getSponsor(u)), (uplineUser, index) => {
-        return index > 0 && _.includes([
-          'announcement-confirmed', 'waiting-for-announcement-confirmation', 'waiting-for-review',
-          'waiting-for-docs', 'blocked-by-upline', 'waiting-for-announcement-to-be-queued'
-        ], this.userState(uplineUser));
-
-      });
-      if (newSponsor) {
-        u.oldSponsor = _.merge(_.clone(u.sponsor), { replacedAt: firebase.database.ServerValue.TIMESTAMP });
-        u.newSponsor = _.pick(newSponsor, ['userId', 'name', 'profilePhotoUrl']);
-        u.newSponsor.announcementTransactionConfirmed = !!newSponsor.wallet &&
-          !!newSponsor.wallet.announcementTransaction &&
-          !!newSponsor.wallet.announcementTransaction.blockNumber &&
-          !!newSponsor.wallet.announcementTransaction.hash;
+      let sponsorState: string = this.sponsorState(u);
+      if (sponsorState === 'missing-wallet' || (sponsorState == 'disabled' && this.getSponsor(u).fraudSuspected)) {
+        let newSponsor = _.find(self.uplineUsers(self.getSponsor(u)), (uplineUser, index) => {
+          return index > 0 && uplineUser.state !== 'missing-wallet';
+        });
+        if (newSponsor) {
+          u.oldSponsor = _.merge(_.clone(u.sponsor), { replacedAt: firebase.database.ServerValue.TIMESTAMP });
+          u.newSponsor = _.pick(newSponsor, ['userId', 'name', 'profilePhotoUrl']);
+          u.newSponsor.announcementTransactionConfirmed = !!newSponsor.wallet &&
+            !!newSponsor.wallet.announcementTransaction &&
+            !!newSponsor.wallet.announcementTransaction.blockNumber &&
+            !!newSponsor.wallet.announcementTransaction.hash;
+        }
       }
     });
-
-    _.each(self.users, (u, uid) => {
-      if (u.newSponsor) {
-        u.sponsor = u.newSponsor;
-        self.userRef(u).update({ oldSponsor: u.oldSponsor, sponsor: u.sponsor }).then(() => {
-          log.info(`reassigned record ${reassigned}`);
-          log.info(`u.userId: ${u.userId}, u.oldSponsor.userId: ${u.oldSponsor.userId}, u.newSponsor.userId: ${u.newSponsor.userId}`);
-        });
-        reassigned++;
-      }
+    blockedUsers = _.filter(blockedUsers, 'newSponsor');
+    _.each(blockedUsers, (u, uid) => {
+      u.sponsor = u.newSponsor;
+      self.userRef(u).update({ oldSponsor: u.oldSponsor, sponsor: u.sponsor }).then(() => {
+        log.info(`reassigned record ${reassigned}`);
+        log.info(`u.userId: ${u.userId}, u.oldSponsor.userId: ${u.oldSponsor.userId}, u.newSponsor.userId: ${u.newSponsor.userId}`);
+      });
+      reassigned++;
     });
 
     self.fixDownlineInfo();
-
-    log.info(`${numBlocked} blocked users`);
     log.info(`${reassigned} blocked users were reassigned`);
   }
 
@@ -308,26 +300,13 @@ export class DataManipulator {
   }
 
   announceUsers() {
-    this.ref(`/identityAnnouncementQueue/tasks`).once('value', (snapshot: firebase.database.DataSnapshot) => {
-      let identityAnnouncementTasks: any = snapshot.val() || {}
-      // _.each(identityAnnouncementTasks, (t, tid) => { t.taskId = tid; });
-      // log.info('grouped by state', _.groupBy(identityAnnouncementTasks, '_state'));
-      // log.info('grouped by error', _.groupBy(identityAnnouncementTasks, '_error_details.error'));
-
-      let alreadyAnnouncedUserIds: any[] = _.map(_.reject(identityAnnouncementTasks, '_state'), 'userId');
-      log.info(`count of alreadyAnnouncedUserIds: ${_.size(alreadyAnnouncedUserIds)}`);
-
-      let announceableUsers: any[] = _.filter(this.users, (u: any) => {
-        return this.userState(u) === 'waiting-for-announcement-to-be-queued' && !_.includes(alreadyAnnouncedUserIds, u.userId);
-      });
-
-      _.each(announceableUsers, (u: any) => {
-        this.ref('/walletCreatedQueue/tasks').push({ userId: u.userId }).then(() => {
-          log.info(`announced user ${this.userRef(u).toString()}`);
-        })
-      });
-      log.info(`number of users announced: ${_.size(announceableUsers)}`);
+    let announceableUsers: any[] = _.filter(this.users, { state: 'waiting-for-announcement-to-be-queued' } );
+    _.each(announceableUsers, (u: any) => {
+      this.ref('/walletCreatedQueue/tasks').push({ userId: u.userId }).then(() => {
+        log.info(`announced user ${this.userRef(u).toString()}`);
+      })
     });
+    log.info(`number of users announced: ${_.size(announceableUsers)}`);
   }
 
   disableFraudSuspectedUsers() {
@@ -382,28 +361,83 @@ export class DataManipulator {
   }
 
   notifyUsers() {
+    let oecdCountries: any = {
+      'Australia': 'AU',
+      'Austria': 'AT',
+      'Belgium': 'BE',
+      'Canada': 'CA',
+      'Switzerland': 'CH',
+      'Germany': 'DE',
+      'Denmark': 'DK',
+      'Spain': 'ES',
+      'Finland': 'FI',
+      'France': 'FR',
+      'United Kingdom': 'GB',
+      'Greece': 'GR',
+      'Ireland': 'IE',
+      'Iceland': 'IS',
+      'Italy': 'IT',
+      'Japan': 'JP',
+      'Korea': 'KR',
+      'Luxembourg': 'LU',
+      'Mexico': 'MX',
+      'Liechtenstein': 'FL',
+      'Norway': 'NO',
+      'New Zealand': 'NW',
+      'Portugal': 'PT',
+      'Sweden': 'SE',
+      'United States': 'US',
+      'Puerto Rico': 'US',
+      'Netherlands': 'NL',
+      'Republic of Korea': 'KR'
+    };
+    let oecdCountryCodes = _.values(oecdCountries);
+    let targetUsers: any[] = _.filter(this.users, { state: 'missing-wallet' });
+    log.info(`missing-wallet count=${_.size(targetUsers)}`);
 
-    let oecdCountryCodes = [
-      'AU', 'AT', 'BE', 'CA', 'CH', 'DE', 'DK', 'ES', 'FI', 'FR', 'GB', 'GR',
-      'IE', 'IS', 'IT', 'JP', 'KR', 'LU', 'MX', 'FL', 'NO', 'NZ', 'PT', 'SE', 'US'
-    ];
-    let targetUsers: any[] = _.filter(this.users, { state: 'waiting-for-docs' });
+    let countries: any[] = require('country-data').countries.all;
+
+    targetUsers = _.filter(targetUsers, (u: any) => {
+      let countryCode: string = u.countryCode;
+      if (!countryCode && u.phone) {
+        let phoneNumberUtil: any = require('google-libphonenumber').PhoneNumberUtil.getInstance();
+        try {
+            // phone must begin with '+'
+            let numberProto: any = phoneNumberUtil.parse(u.phone, "");
+            let callingCode: any = numberProto.getCountryCode();
+            if (callingCode) {
+              let country = _.find(countries, (c) => {
+                return _.includes(c.countryCallingCodes, `+${callingCode}`);
+              });
+              if (country) {
+                countryCode = country.alpha2;
+              }
+            }
+        } catch(e) {
+          // log.info(`got exception ${e} for phone ${u.phone}`);
+        }
+      }
+      if (!countryCode && u.prefineryUser && u.prefineryUser.country) {
+        let prefineryCountry: string = <string> u.prefineryUser.country;
+        countryCode = oecdCountries[prefineryCountry];
+      }
+      return _.includes(oecdCountryCodes, countryCode);
+    });
+
     log.info(`targetUsers=${_.size(targetUsers)}`);
     targetUsers = _.filter(targetUsers, 'email');
+    log.info(`targetUsers with email=${_.size(targetUsers)}`);
     targetUsers = _.filter(targetUsers, 'phone');
+    log.info(`targetUsers with phone=${_.size(targetUsers)}`);
     targetUsers = _.filter(targetUsers, 'name');
-    targetUsers = _.filter(targetUsers, (u: any) => { return _.includes(oecdCountryCodes, u.countryCode)});
-    log.info(`targetUsers in oecd=${_.size(targetUsers)}`);
-    // targetUsers = _.reject(targetUsers, 'unblockEmailSent');
-    // log.info(`targetUsers in oecd=${_.size(targetUsers)}`);
-    targetUsers = _.reject(targetUsers, (u) => { return _.includes(sentPhones, u.phone); });
-    log.info(`targetUsers still pending=${_.size(targetUsers)}`);
+    log.info(`targetUsers with name=${_.size(targetUsers)}`);
+    log.info(`targetUsers=${_.size(targetUsers)}`);
 
-    _.each(targetUsers, (u: any) => {
-      this.sendSms(u.phone, "Your 2,000 UR Bonus is waiting for you. Please sign in and verify your account. https://web.ur.technology").then(() => {
-        this.userRef(u).update({unblockEmailSent: true})
-      })
-    });
+    // _.each(targetUsers, (u: any) => {
+    //   this.sendSms(u.phone, "Your 2,000 UR Bonus is waiting for you. Please sign in and verify your account. https://web.ur.technology").then(() => {
+    //     this.userRef(u).update({unblockEmailSent: true})
+    //   })
+    // });
 
 
     // var fs = require('fs');
@@ -432,54 +466,35 @@ export class DataManipulator {
   displayStats() {
     let groups: any;
 
+    log.info(`\ntotal users: ${_.size(this.users)}\n`);
+
     groups = _.groupBy(this.users, 'state');
     _.each(groups, (group, state) => {
       log.info(`  state: ${state}, count: ${_.size(group)}`);
+      if (state === 'blocked-by-upline') {
+        let subGroups: any = _.groupBy(group, (u) => {
+          return this.rootUser(u).state;
+        });
+        _.each(subGroups, (subGroup: any[], subGroupState: string) => {
+          log.info(`         blocking user state: ${subGroupState}, count: ${_.size(subGroup)}`);
+        });
+      }
     });
 
-    let blockedUsers: any[], rootUsers: any[];
-
-    blockedUsers = groups['blocked-by-upline'];
-    rootUsers = _.uniq(_.map(blockedUsers, (u) => { return this.rootUser(u); }));
-    rootUsers = _.sortBy(rootUsers, (u) => { u.state = this.userState(u); return u.state });
-    log.info(`\nblocking users: ${_.size(rootUsers)}, number blocked: ${_.size(blockedUsers)}`);
-    _.each(rootUsers, (u) => { log.info(`  ${u.userId} / ${u.name} / ${u.email} / ${u.phone} / ${u.state}`); });
-
-    blockedUsers = _.filter(blockedUsers, (u) => { return _.includes(['missing-wallet','disabled'], this.sponsorState(u)) });
-    log.info(`\nblocked users who should be moved: ${_.size(blockedUsers)}`);
-    _.each(blockedUsers, (u) => { log.info(`  ${u.userId} / ${u.name} / ${u.email} / ${u.phone} / ${u.state}`); });
-
-    blockedUsers = groups['fraud-suspected'];
-    log.info(`\nusers suspected of fraud: ${_.size(blockedUsers)}`);
-    _.each(blockedUsers, (u) => { log.info(`  ${u.userId} / ${u.name} / ${u.email} / ${u.phone} / ${u.state}`); });
-
-    log.info(`\nusers with updatedAt: ${_.size(_.filter(this.users, 'updatedAt'))}`);
-
     let confirmedUsers: any[] = _.filter(this.users, {state: 'announcement-confirmed'});
-    let millisecondsPerDay = 1000 * 60 * 60 * 24;
+    log.info(`\nconfirmed user count by day (Central Time):`);
     let usersLeft = _.size(confirmedUsers)
     _.each(confirmedUsers, (u) => {
       let hash: number = u.wallet.announcementTransaction.hash;
       this.userRef(u).child(`transactions/${hash}/createdAt`).once('value', (snapshot: firebase.database.DataSnapshot) => {
-        let walletCreatedAt = snapshot.val();
-
-        log.info(`\nu.updatedAt=${u.updatedAt}`);
-        log.info(`walletCreatedAt=${walletCreatedAt}`);
-        log.info(`u.createdAt=${u.createdAt}`);
-
-        let updatedAt: number = parseInt(u.updatedAt || walletCreatedAt || u.createdAt);
-        u.dayUpdated = updatedAt - ( updatedAt % millisecondsPerDay ) + millisecondsPerDay;
+        let createdAt: number = parseInt(snapshot.val());
+        u.dayCreated = moment(createdAt).utcOffset(-300).startOf('day').format('YYYY-MM-DD');
         usersLeft--;
-        if (usersLeft % 5000 === 0) {
-          log.info(`processed 5000 users`);
-        }
         if (usersLeft === 0) {
-          let groups = _.groupBy(confirmedUsers, 'dayUpdated');
+          let groups = _.groupBy(confirmedUsers, 'dayCreated');
           let days = _.takeRight(_.keys(groups).sort(), 20);
-          _.each(days, (dayUpdated: string) => {
-            let g = groups[dayUpdated];
-            let minBlockNumber: any = _.min(_.map(g, 'wallet.announcementTransaction.blockNumber'));
-            log.info(`${dayUpdated ? new Date(parseInt(dayUpdated)).toString().substring(0,10) : 'none'}\t${_.size(g)}`);
+          _.each(days, (dayCreated: string) => {
+            log.info(`${dayCreated}\t${_.size(groups[dayCreated])}`);
           });
         }
       });
