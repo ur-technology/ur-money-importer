@@ -90,31 +90,33 @@ export class DataManipulator {
   private userState(u: any): string {
     if (!this.isTopUser(u) && !u.sponsor) {
       return 'missing-sponsor';
-    } else if (!u.wallet || !u.wallet.address) {
-      return 'missing-wallet';
     } if (u.disabled) {
       return 'disabled'
     } if (u.fraudSuspected) {
       return 'fraud-suspected'
-    } else if (u.wallet.announcementTransaction && u.wallet.announcementTransaction.hash && u.wallet.announcementTransaction.blockNumber) {
+    } else if (u.wallet && u.wallet.announcementTransaction && u.wallet.announcementTransaction.hash && u.wallet.announcementTransaction.blockNumber) {
       return 'announcement-confirmed';
-    } else if (u.wallet.announcementTransaction && u.wallet.announcementTransaction.hash) {
+    } else if (u.wallet && u.wallet.announcementTransaction && u.wallet.announcementTransaction.hash) {
       return 'waiting-for-announcement-to-be-confirmed';
+    } else if (!u.serverHashedPassword && !(u.wallet && u.wallet.address)) {
+      return 'missing-password-and-wallet';
     } else if (!u.signUpBonusApproved && !(u.idUploaded && u.selfieMatched)) {
-      return 'waiting-for-docs';
+      return 'missing-docs';
     } else if (!u.signUpBonusApproved) {
-      return 'waiting-for-review';
+      return 'waiting-for-review'; // need to get further detail from FreshDesk
+    } else if (!(u.wallet && u.wallet.address)) {
+      return 'missing-wallet';
     } else if (!u.sponsor.announcementTransactionConfirmed) {
       let s = this.sponsorState(u);
       switch (s) {
         case 'missing-sponsor':
-        case 'missing-wallet':
         case 'disabled':
         case 'fraud-suspected':
-        case 'waiting-for-docs':
-        case 'blocked-by-upline':
-        case 'waiting-for-announcement-confirmation':
+        case 'missing-password-and-wallet':
+        case 'missing-docs':
         case 'waiting-for-review':
+        case 'missing-wallet':
+        case 'blocked-by-upline':
         case 'waiting-for-announcement-to-be-queued':
           return `blocked-by-upline`
 
@@ -179,21 +181,29 @@ export class DataManipulator {
       }
 
       if (!_.isEqual(u.newDownlineUsers, u.downlineUsers || {})) {
+        // log.info(`\n\n***u.userId=${u.userId}\n***u.newDownlineUsers=${JSON.stringify(u.newDownlineUsers)}\n***u.downlineUsers=${JSON.stringify(u.downlineUsers)}`);
         u.downlineUsers = u.newDownlineUsers;
         self.userRef(u).update({ downlineUsers: u.downlineUsers });
         updatedDownlineUsers++;
       }
 
       if (u.newDownlineSize !== u.downlineSize) {
+        // log.info(`\n\n***u.userId=${u.userId}\n***u.newDownlineSize=${u.newDownlineSize}\n***u.downlineSize=${u.downlineSize}`);
         u.downlineSize = u.newDownlineSize;
         self.userRef(u).update({ downlineSize: u.downlineSize });
         updatedDownlineSizes++;
       }
     });
 
-    log.info(`updatedDownlineLevels=${updatedDownlineLevels}`);
-    log.info(`updatedDownlineUsers=${updatedDownlineUsers}`);
-    log.info(`updatedDownlineSizes=${updatedDownlineSizes}`);
+    if (updatedDownlineLevels > 0) {
+      log.info(`updated downlineLevel ${updatedDownlineLevels} times`);
+    }
+    if (updatedDownlineUsers > 0) {
+      log.info(`updated downlineUsers ${updatedDownlineUsers} times`);
+    }
+    if (updatedDownlineSizes > 0) {
+      log.info(`updated downlineSize ${updatedDownlineSizes} times`);
+    }
   }
 
   unblockUsers() {
@@ -203,7 +213,8 @@ export class DataManipulator {
     let blockedUsers: any[] = _.filter(this.users, { state: 'blocked-by-upline' });
     _.each(blockedUsers, (u, uid) => {
       let sponsorState: string = this.sponsorState(u);
-      if (sponsorState === 'missing-wallet' || (sponsorState == 'disabled' && this.getSponsor(u).fraudSuspected)) {
+      let sponsor = this.getSponsor(u);
+      if (sponsorState === 'missing-password-and-wallet' || (sponsorState == 'disabled' && this.getSponsor(u).fraudSuspected)) {
         let newSponsor = _.find(self.uplineUsers(self.getSponsor(u)), (uplineUser, index) => {
           return index > 0 && uplineUser.state !== 'missing-wallet';
         });
@@ -221,8 +232,7 @@ export class DataManipulator {
     _.each(blockedUsers, (u, uid) => {
       u.sponsor = u.newSponsor;
       self.userRef(u).update({ oldSponsor: u.oldSponsor, sponsor: u.sponsor }).then(() => {
-        log.info(`reassigned record ${reassigned}`);
-        log.info(`u.userId: ${u.userId}, u.oldSponsor.userId: ${u.oldSponsor.userId}, u.newSponsor.userId: ${u.newSponsor.userId}`);
+        log.info(`reassigned u.userId: ${u.userId}, u.oldSponsor.userId: ${u.oldSponsor.userId}, u.newSponsor.userId: ${u.newSponsor.userId}`);
       });
       reassigned++;
     });
@@ -360,7 +370,91 @@ export class DataManipulator {
     return upline;
   }
 
+  checkNotifiedUsers() {
+    let targetUsers: any[] = _.filter(this.users, 'marketingTests.1');
+    log.info(`targetUsers count=${_.size(targetUsers)}`);
+    let sent: any[] = _.filter(targetUsers, 'marketingTests.1.initiated');
+    let sentWithBonus: any[] = _.filter(sent, { state: 'announcement-confirmed'});
+    let notSent: any[] = _.reject(targetUsers, 'marketingTests.1.initiated');
+    let notSentWithBonus: any[] = _.filter(notSent, { state: 'announcement-confirmed'});
+    log.info(`sent total=${_.size(sent)}`);
+    log.info(`sent with bonus=${_.size(sentWithBonus)}`);
+    log.info(`notSent count=${_.size(notSent)}`);
+    log.info(`notSent with bonus=${_.size(notSentWithBonus)}`);
+  }
+
   notifyUsers() {
+    let targetUsers: any[] = _.filter(this.users, { state: 'missing-docs' });
+    log.info(`targetUsers count=${_.size(targetUsers)}`);
+
+    let startTime: number = moment("2017-04-03 00:00:00-05:00").valueOf();
+    let endTime: number = moment("2017-04-23 00:00:00-05:00").valueOf();
+    targetUsers = _.filter(targetUsers, (u) => {
+      return u.createdAt && u.createdAt >= startTime && u.createdAt <= endTime;
+    });
+    log.info(`targetUsers past apr 3 time count=${_.size(targetUsers)}`);
+
+    targetUsers = _.filter(targetUsers, 'phone');
+    log.info(`targetUsers with phone=${_.size(targetUsers)}`);
+
+    let countries: any[] = require('country-data').countries.all;
+    _.each(targetUsers, (u: any) => {
+      if (!u.countryCode && u.phone) {
+        let phoneNumberUtil: any = require('google-libphonenumber').PhoneNumberUtil.getInstance();
+        try {
+            // phone must begin with '+'
+            let numberProto: any = phoneNumberUtil.parse(u.phone, "");
+            let callingCode: any = numberProto.getCountryCode();
+            if (callingCode) {
+              let country = _.find(countries, (c) => {
+                return _.includes(c.countryCallingCodes, `+${callingCode}`);
+              });
+              if (country) {
+                u.countryCode = country.alpha2;
+              }
+            }
+        } catch(e) {
+          // log.info(`got exception ${e} for phone ${u.phone}`);
+        }
+      }
+    });
+
+
+    // targetUsers = _.filter(targetUsers, 'email');
+    // log.info(`targetUsers with email=${_.size(targetUsers)}`);
+    //
+    // targetUsers = _.filter(targetUsers, 'name');
+    // log.info(`targetUsers with name=${_.size(targetUsers)}`);
+
+    this.notifyNextUser(targetUsers, 0);
+  }
+
+  notifyNextUser(targetUsers: any[], index: number) {
+    if (index > targetUsers.length - 1) {
+      return;
+    }
+
+    let u: any = targetUsers[index];
+
+    if (u.marketingTests && ( u.marketingTests[1] || u.marketingTests["1"] )) {
+      this.notifyNextUser(targetUsers, index + 1);
+      return;
+    }
+
+    if (index % 2 === 0) {
+      this.userRef(u).child('marketingTests/1').update({initiated: true});
+      let message = "Your are one step away from receiving your free UR cryptocurrency. Visit web.ur.technology to complete signup and claim your UR.";
+      this.sendSms(u.phone, message).then(() => {
+        this.userRef(u).child('marketingTests/1').update({completed: true});
+        this.notifyNextUser(targetUsers, index + 1);
+      })
+    } else {
+      this.userRef(u).child('marketingTests/1').update({initiated: false});
+      this.notifyNextUser(targetUsers, index + 1);
+    }
+  }
+
+  notifyUsers2() {
     let oecdCountries: any = {
       'Australia': 'AU',
       'Austria': 'AT',
@@ -481,6 +575,7 @@ export class DataManipulator {
       }
     });
 
+
     let confirmedUsers: any[] = _.filter(this.users, {state: 'announcement-confirmed'});
     log.info(`\nconfirmed user count by day (Central Time):`);
     let usersLeft = _.size(confirmedUsers)
@@ -492,7 +587,7 @@ export class DataManipulator {
         usersLeft--;
         if (usersLeft === 0) {
           let groups = _.groupBy(confirmedUsers, 'dayCreated');
-          let days = _.takeRight(_.keys(groups).sort(), 20);
+          let days = _.takeRight(_.keys(groups).sort(), 60);
           _.each(days, (dayCreated: string) => {
             log.info(`${dayCreated}\t${_.size(groups[dayCreated])}`);
           });
@@ -502,7 +597,19 @@ export class DataManipulator {
 
   }
 
-
+  displayDuplicateSignups() {
+    let confirmedUsers: any[] = _.filter(this.users, {state: 'announcement-confirmed'});
+    _.each(confirmedUsers, (u) => {
+      this.userRef(u).child(`transactions`).once('value', (snapshot: firebase.database.DataSnapshot) => {
+        let transactions: any = snapshot.val() || {};
+        let signUpTransactions: any[] = _.filter(transactions, (t: any) => { return t.level === 0; });
+        let num: number = _.size(signUpTransactions);
+        if (num > 1) {
+          log.info(`${num} sign-up transactions for user ${u.userId}`);
+        }
+      });
+    });
+  }
   openMissingFreshdeskTickets() {
     let usersWithReviewPending: any[] = _.filter(this.users, (u) => { return this.userState(u) === 'waiting-for-review'; });
     usersWithReviewPending = _.reject(usersWithReviewPending, 'freshdeskUrl');
@@ -587,7 +694,7 @@ export class DataManipulator {
         }
 
         log.debug(`  sent message '${messageText.substring(0,20)}' to ${phone}`);
-        setTimeout(resolve, 500);
+        setTimeout(resolve, 250);
       });
     });
   }

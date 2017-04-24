@@ -20,13 +20,15 @@ admin.initializeApp({
 let dataManipulator = new DataManipulator(process.env, admin.database(), admin.auth());
 dataManipulator.displayStats();
 
-dataManipulator.unblockUsers();
+dataManipulator.announceUsers();
+// dataManipulator.unblockUsers();
 // dataManipulator.notifyUsers();
+// dataManipulator.checkNotifiedUsers();
 // dataManipulator.fixSendUrTransactions();
 // dataManipulator.openMissingFreshdeskTickets();
-dataManipulator.announceUsers();
 // dataManipulator.disableFraudSuspectedUsers();
 // dataManipulator.disableFraudulentDownline('xxx@example.com');
+// dataManipulator.displayDuplicateSignups();
 
 // log.info("all done!");
 
