@@ -357,6 +357,10 @@ export class DataManipulator {
 
   disableAndSignOutUser(u: any) {
     this.userRef(u).update({ disabled: true });
+    this.signOutUser(u);
+  }
+
+  signOutUser(u: any) {
     this.auth.deleteUser(u.userId)
   }
 
@@ -595,6 +599,47 @@ export class DataManipulator {
       });
     });
 
+  }
+
+  signOutDisabledUsers() {
+    let disabledUsers: any[] = _.filter(this.users, 'disabled');
+    log.info(`count of disabledUsers=${_.size(disabledUsers)}`);
+    this.disableNextBatchOfUsers(disabledUsers, 0);
+  }
+
+  disableNextBatchOfUsers(disabledUsers: any[], index: number) {
+    let batchSize: number = 200;
+    log.info(`batch index=${index}`);
+    let lastIndex: number = _.min([index + batchSize - 1, disabledUsers.length - 1]);
+    for (let i = index; i <= lastIndex; i++) {
+      let finalizeBatch = () => {
+        if (i === disabledUsers.length - 1) {
+          let signedInUsers: any[] = _.filter(disabledUsers, 'signedIn');
+          log.info(`${_.size(signedInUsers)} need to be signed out`);
+          _.each(signedInUsers, (u: any) => {
+            this.signOutUser(u);
+            log.info(`signed out user ${u.userId}`);
+          });
+        } else if (i === lastIndex) {
+          this.disableNextBatchOfUsers(disabledUsers, index+batchSize);
+        }
+      }
+
+      let u: any = disabledUsers[i];
+      this.auth.getUser(u.userId).then(() => {
+        u.completed = true;
+        u.signedIn = true;
+        finalizeBatch();
+      }, (error: any) => {
+        u.completed = true;
+        if (error && error.code === 'auth/user-not-found') {
+          u.signedIn = false;
+        } else {
+          log.info(`error=${JSON.stringify(error)}`);
+        }
+        finalizeBatch();
+      });
+    }
   }
 
   displayDuplicateSignups() {
