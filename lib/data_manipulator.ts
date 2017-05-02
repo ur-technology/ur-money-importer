@@ -94,6 +94,8 @@ export class DataManipulator {
       return 'disabled'
     } if (u.fraudSuspected) {
       return 'fraud-suspected'
+    } else if (u.wallet && u.wallet.announcementTransaction && u.wallet.announcementTransaction.hash && u.wallet.announcementTransaction.blockNumber && u.signUpBonusApproved) {
+      return 'bonus-approved';
     } else if (u.wallet && u.wallet.announcementTransaction && u.wallet.announcementTransaction.hash && u.wallet.announcementTransaction.blockNumber) {
       return 'announcement-confirmed';
     } else if (u.wallet && u.wallet.announcementTransaction && u.wallet.announcementTransaction.hash) {
@@ -215,10 +217,12 @@ export class DataManipulator {
       let sponsorState: string = this.sponsorState(u);
       let sponsor = this.getSponsor(u);
       if (sponsorState === 'missing-password-and-wallet' || (sponsorState == 'disabled' && this.getSponsor(u).fraudSuspected)) {
+        log.info(`blockedUser userId=${u.userId}, state=${u.state}, sponsorState=${sponsorState}`);
         let newSponsor = _.find(self.uplineUsers(self.getSponsor(u)), (uplineUser, index) => {
-          return index > 0 && uplineUser.state !== 'missing-wallet';
+          return index > 0 && !_.includes(blockingStates, uplineUser);
         });
         if (newSponsor) {
+          // log.info(`${sponsor.email}\t${sponsor.state}\thttps://web.ur.technology/?admin-redirect=true&redirect=user&id=${sponsor.userId}`);
           u.oldSponsor = _.merge(_.clone(u.sponsor), { replacedAt: firebase.database.ServerValue.TIMESTAMP });
           u.newSponsor = _.pick(newSponsor, ['userId', 'name', 'profilePhotoUrl']);
           u.newSponsor.announcementTransactionConfirmed = !!newSponsor.wallet &&
@@ -311,7 +315,7 @@ export class DataManipulator {
 
   announceUsers() {
     let announceableUsers: any[] = _.filter(this.users, { state: 'waiting-for-announcement-to-be-queued' } );
-    _.each(announceableUsers, (u: any) => {
+    _.each(announceableUsers, (u: any, index: number) => {
       this.ref('/walletCreatedQueue/tasks').push({ userId: u.userId }).then(() => {
         log.info(`announced user ${this.userRef(u).toString()}`);
       })
@@ -561,6 +565,19 @@ export class DataManipulator {
 
   }
 
+  showUserTransactions() {
+    let u: any = this.users["-KXDMY4SKI5SbEEGXT3t"];
+    this.userRef(u).child(`transactions`).once('value', (snapshot: firebase.database.DataSnapshot) => {
+      let transactions: any[] = _.sortBy(_.filter(snapshot.val(), {type: 'sent'}), 'createdAt');
+      log.info(`User ${u.name} - email: ${u.email}, id: ${u.userId}\n  number of send transactions: ${_.size(transactions)}`);
+      _.each(transactions, (t) => {
+        let amount: string = new BigNumber(t.amount).dividedBy(1000000000000000000).toFormat(2);
+        let time: string = moment(t.createdAt).utcOffset(-300).format();
+        log.info(`\n  txid: ${t.urTransaction.hash}\n  to: ${t.urTransaction.to}\n  amount: ${amount}\n  time: ${time}\n  blockNumber: ${t.urTransaction.blockNumber}\n  receiver: ${t.receiver.name}`);
+      });
+    });
+  }
+
   displayStats() {
     let groups: any;
 
@@ -575,12 +592,14 @@ export class DataManipulator {
         });
         _.each(subGroups, (subGroup: any[], subGroupState: string) => {
           log.info(`         blocking user state: ${subGroupState}, count: ${_.size(subGroup)}`);
+          // _.each(subGroup, (u) => {
+          //   log.info(`${u.email}\t${u.state}\thttps://web.ur.technology/?admin-redirect=true&redirect=user&id=${u.userId}`);
+          // });
         });
       }
     });
 
-
-    let confirmedUsers: any[] = _.filter(this.users, {state: 'announcement-confirmed'});
+    let confirmedUsers: any[] = _.filter(this.users, {state: 'bonus-approved'});
     log.info(`\nconfirmed user count by day (Central Time):`);
     let usersLeft = _.size(confirmedUsers)
     _.each(confirmedUsers, (u) => {
@@ -591,9 +610,12 @@ export class DataManipulator {
         usersLeft--;
         if (usersLeft === 0) {
           let groups = _.groupBy(confirmedUsers, 'dayCreated');
-          let days = _.takeRight(_.keys(groups).sort(), 60);
+          let days: string[] = _.keys(groups).sort();
+          let total: number = 0;
           _.each(days, (dayCreated: string) => {
-            log.info(`${dayCreated}\t${_.size(groups[dayCreated])}`);
+            let count: number = _.size(groups[dayCreated]);
+            total = total + count;
+            log.info(`${dayCreated}\t${count}\t${total}`);
           });
         }
       });
