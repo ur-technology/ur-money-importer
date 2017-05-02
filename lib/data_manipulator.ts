@@ -213,13 +213,14 @@ export class DataManipulator {
     let reassigned = 0;
 
     let blockedUsers: any[] = _.filter(this.users, { state: 'blocked-by-upline' });
+    let blockingStates = ['missing-password-and-wallet', 'disabled'];
     _.each(blockedUsers, (u, uid) => {
       let sponsorState: string = this.sponsorState(u);
       let sponsor = this.getSponsor(u);
-      if (sponsorState === 'missing-password-and-wallet' || (sponsorState == 'disabled' && this.getSponsor(u).fraudSuspected)) {
+      if (_.includes(blockingStates, sponsorState)) {
         log.info(`blockedUser userId=${u.userId}, state=${u.state}, sponsorState=${sponsorState}`);
         let newSponsor = _.find(self.uplineUsers(self.getSponsor(u)), (uplineUser, index) => {
-          return index > 0 && !_.includes(blockingStates, uplineUser);
+          return index > 0 && !_.includes(blockingStates, sponsorState);
         });
         if (newSponsor) {
           // log.info(`${sponsor.email}\t${sponsor.state}\thttps://web.ur.technology/?admin-redirect=true&redirect=user&id=${sponsor.userId}`);

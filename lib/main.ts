@@ -18,10 +18,10 @@ admin.initializeApp({
 });
 
 let dataManipulator = new DataManipulator(process.env, admin.database(), admin.auth());
-// dataManipulator.displayStats();
+dataManipulator.displayStats();
 // dataManipulator.signOutDisabledUsers();
 // dataManipulator.unblockUsers();
-dataManipulator.announceUsers();
+// dataManipulator.announceUsers();
 // dataManipulator.showUserTransactions();
 // dataManipulator.notifyUsers();
 // dataManipulator.checkNotifiedUsers();
