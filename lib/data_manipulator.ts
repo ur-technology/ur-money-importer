@@ -95,9 +95,9 @@ export class DataManipulator {
     } if (u.fraudSuspected) {
       return 'fraud-suspected'
     } else if (u.wallet && u.wallet.announcementTransaction && u.wallet.announcementTransaction.hash && u.wallet.announcementTransaction.blockNumber && u.signUpBonusApproved) {
-      return 'bonus-approved';
+      return 'finalized';
     } else if (u.wallet && u.wallet.announcementTransaction && u.wallet.announcementTransaction.hash && u.wallet.announcementTransaction.blockNumber) {
-      return 'announcement-confirmed';
+      return 'announcement-confirmed-but-bonus-not-approved';
     } else if (u.wallet && u.wallet.announcementTransaction && u.wallet.announcementTransaction.hash) {
       return 'waiting-for-announcement-to-be-confirmed';
     } else if (!u.serverHashedPassword && !(u.wallet && u.wallet.address)) {
@@ -464,106 +464,23 @@ export class DataManipulator {
   }
 
   notifyUsers2() {
-    let oecdCountries: any = {
-      'Australia': 'AU',
-      'Austria': 'AT',
-      'Belgium': 'BE',
-      'Canada': 'CA',
-      'Switzerland': 'CH',
-      'Germany': 'DE',
-      'Denmark': 'DK',
-      'Spain': 'ES',
-      'Finland': 'FI',
-      'France': 'FR',
-      'United Kingdom': 'GB',
-      'Greece': 'GR',
-      'Ireland': 'IE',
-      'Iceland': 'IS',
-      'Italy': 'IT',
-      'Japan': 'JP',
-      'Korea': 'KR',
-      'Luxembourg': 'LU',
-      'Mexico': 'MX',
-      'Liechtenstein': 'FL',
-      'Norway': 'NO',
-      'New Zealand': 'NW',
-      'Portugal': 'PT',
-      'Sweden': 'SE',
-      'United States': 'US',
-      'Puerto Rico': 'US',
-      'Netherlands': 'NL',
-      'Republic of Korea': 'KR'
-    };
-    let oecdCountryCodes = _.values(oecdCountries);
-    let targetUsers: any[] = _.filter(this.users, { state: 'missing-wallet' });
-    log.info(`missing-wallet count=${_.size(targetUsers)}`);
+    let targetUsers: any[] = _.filter(this.users, 'signUpBonusApproved');
+    log.info(`targetUsers count=${_.size(targetUsers)}`);
 
-    let countries: any[] = require('country-data').countries.all;
+    targetUsers = _.reject(targetUsers, 'disabled');
+    log.info(`targetUsers not disabled ${_.size(targetUsers)}`);
 
-    targetUsers = _.filter(targetUsers, (u: any) => {
-      let countryCode: string = u.countryCode;
-      if (!countryCode && u.phone) {
-        let phoneNumberUtil: any = require('google-libphonenumber').PhoneNumberUtil.getInstance();
-        try {
-            // phone must begin with '+'
-            let numberProto: any = phoneNumberUtil.parse(u.phone, "");
-            let callingCode: any = numberProto.getCountryCode();
-            if (callingCode) {
-              let country = _.find(countries, (c) => {
-                return _.includes(c.countryCallingCodes, `+${callingCode}`);
-              });
-              if (country) {
-                countryCode = country.alpha2;
-              }
-            }
-        } catch(e) {
-          // log.info(`got exception ${e} for phone ${u.phone}`);
-        }
-      }
-      if (!countryCode && u.prefineryUser && u.prefineryUser.country) {
-        let prefineryCountry: string = <string> u.prefineryUser.country;
-        countryCode = oecdCountries[prefineryCountry];
-      }
-      return _.includes(oecdCountryCodes, countryCode);
-    });
-
-    log.info(`targetUsers=${_.size(targetUsers)}`);
     targetUsers = _.filter(targetUsers, 'email');
-    log.info(`targetUsers with email=${_.size(targetUsers)}`);
-    targetUsers = _.filter(targetUsers, 'phone');
-    log.info(`targetUsers with phone=${_.size(targetUsers)}`);
-    targetUsers = _.filter(targetUsers, 'name');
-    log.info(`targetUsers with name=${_.size(targetUsers)}`);
-    log.info(`targetUsers=${_.size(targetUsers)}`);
+    log.info(`targetUsers with email ${_.size(targetUsers)}`);
 
-    // _.each(targetUsers, (u: any) => {
-    //   this.sendSms(u.phone, "Your 2,000 UR Bonus is waiting for you. Please sign in and verify your account. https://web.ur.technology").then(() => {
-    //     this.userRef(u).update({unblockEmailSent: true})
-    //   })
-    // });
-
-
-    // var fs = require('fs');
-    // var stream = fs.createWriteStream("my_file.csv");
-    // stream.once('open', function(fd: any) {
-    //   _.each(targetUsers, (u: any) => {
-    //     stream.write(`=\"${u.userId}\",\"${_.trim(u.name)}\",\"${u.email}\",=\"${u.phone}\",\"${u.countryCode}\"\n`);
-    //   });
-    //   stream.end();
-    // });
-
-    // let count = 0;
-    // countryCodes = _.sortBy(countryCodes, (countryCode) => {
-    //   if (_.includes(oecdCountryCodes, countryCode)) {
-    //     count = count + _.size(countryCodeGroups[countryCode]);
-    //   }
-    //   return -((_.includes(oecdCountryCodes, countryCode) ? 10000 : 0 ) + _.size(countryCodeGroups[countryCode]));
-    // });
-    // log.info(`count=${count}`);
-    // _.each(countryCodes, (countryCode) => {
-    //   log.info(`oecd=${_.includes(oecdCountryCodes, countryCode) ? 'Y' : ' '} / countryCode=${countryCode} / size=${_.size(countryCodeGroups[countryCode])}`)
-    // });
-
+    var fs = require('fs');
+    var stream = fs.createWriteStream("target-users.csv");
+    stream.once('open', function(fd: any) {
+      _.each(targetUsers, (u: any) => {
+        stream.write(`=\"${u.userId}\",\"${_.trim(u.name)}\",\"${u.email}\",=\"${u.phone}\",\"${u.countryCode}\"\n`);
+      });
+      stream.end();
+    });
   }
 
   showUserTransactions() {
@@ -678,6 +595,7 @@ export class DataManipulator {
       });
     });
   }
+
   openMissingFreshdeskTickets() {
     let usersWithReviewPending: any[] = _.filter(this.users, (u) => { return this.userState(u) === 'waiting-for-review'; });
     usersWithReviewPending = _.reject(usersWithReviewPending, 'freshdeskUrl');
@@ -767,5 +685,97 @@ export class DataManipulator {
     });
   }
 
+  broadcastMessages() {
+    let sender: any = _.find(this.users, { email: 'jreitano@ur.technology'});
+    let receivers: any[] = _.filter(this.users, 'signUpBonusApproved');
+    _.each(receivers, (receiver: any, index: number) => {
+      if (receiver.email === 'eiland@ur.technology') {
+        log.info(`receiver userId=${receiver.userId}, email=${receiver.email}`);
+        this.sendChatMessage(sender, receiver, "This is a test from John to Eiland v2");
+      }
+    });
+  }
+
+  private sendChatMessage(sender: any, receiver: any, messageText: string) {
+    this.findOrCreateChatSummary(sender, receiver).then((result: any) => {
+      // add message to list of messages for this chat
+      let messagesRef = this.userRef(sender).child(`chats/${result.chatId}/messages`);
+      let message = {
+        text: messageText,
+        sentAt: firebase.database.ServerValue.TIMESTAMP,
+        senderUserId: sender.userId
+      };
+      let messageRef = messagesRef.push(message);
+      let messageId: string = messageRef.key;
+
+      // copy the message to the 'lastMessage' field of the chat summary associated with this chat
+      let chatSummaryRef = this.userRef(sender).child(`chatSummaries/${result.chatId}`);
+      log.info(`chatId=${result.chatId}, messageId=${messageRef.key}`);
+      chatSummaryRef.child('lastMessage').update(_.merge(message, { messageId: messageId }));
+
+      // add item to queue so that message is copied to chats, chatSummaries and notifications of other users
+      if (result.isFirstMessageInChat) {
+        this.db.ref('/chatSummaryCopyingQueue/tasks').push({
+          userId: sender.userId,
+          chatId: result.chatId
+        });
+      }
+      this.db.ref('/chatMessageCopyingQueue/tasks').push({
+        userId: sender.userId,
+        chatId: result.chatId,
+        messageId: messageId,
+        isFirstMessageInChat: result.isFirstMessageInChat
+      });
+      this.saveChatEvent(sender, result.chatId, messageText, result.chatSummary);
+    });
+  }
+
+  private saveChatEvent(sender: any, chatId: string, messageText: string, chatSummary: any) {
+    let eventRef = this.userRef(sender).child(`events/${chatId}`);
+    let messageSummary = messageText.length > 50 ? `${messageText.substring(0, 50)}...` : messageText;
+    eventRef.set({
+      createdAt: firebase.database.ServerValue.TIMESTAMP,
+      messageText: `You: ${messageSummary}`,
+      notificationProcessed: 'true',
+      profilePhotoUrl: chatSummary.users[chatSummary.displayUserId].profilePhotoUrl,
+      sourceId: chatId,
+      sourceType: 'message',
+      title: chatSummary.users[chatSummary.displayUserId].name,
+      updatedAt: firebase.database.ServerValue.TIMESTAMP,
+      userdId: chatSummary.displayUserId
+    });
+  }
+
+  findOrCreateChatSummary(sender: any, receiver: any): Promise<any> {
+    let self = this;
+    return new Promise((resolve, reject) => {
+      let chatSummariesRef: any = this.userRef(sender).child('chatSummaries');
+      chatSummariesRef.once('value', (snapshot: firebase.database.DataSnapshot) => {
+        let chatSummaries = snapshot.val() || {};
+        let chatId: string = _.findKey(chatSummaries, (chatSummary: any, chatId: string) => {
+          return _.isEqual(_.keys(chatSummary.users).sort(), [sender.userId, receiver.userId].sort());
+        });
+        let chatSummary: any;
+        let isFirstMessageInChat: boolean;
+        if (chatId) {
+          chatSummary = chatSummaries[chatId];
+          isFirstMessageInChat = false;
+        } else {
+          chatSummary = {
+            createdAt: firebase.database.ServerValue.TIMESTAMP,
+            pending: true,
+            creatorUserId: sender.userId,
+            displayUserId: sender.userId,
+            users: {}
+          };
+          chatSummary.users[sender.userId] = _.pick(sender, ['name', 'profilePhotoUrl']);
+          chatSummary.users[receiver.userId] = _.pick(receiver, ['name', 'profilePhotoUrl']);
+          chatId = chatSummariesRef.push(chatSummary).key;
+          isFirstMessageInChat = true;
+        }
+        resolve({chatId: chatId, chatSummary: chatSummary, isFirstMessageInChat: isFirstMessageInChat});
+      });
+    });
+  }
 
 }
