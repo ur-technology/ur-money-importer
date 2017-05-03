@@ -517,17 +517,17 @@ export class DataManipulator {
       }
     });
 
-    let confirmedUsers: any[] = _.filter(this.users, {state: 'bonus-approved'});
-    log.info(`\nconfirmed user count by day (Central Time):`);
-    let usersLeft = _.size(confirmedUsers)
-    _.each(confirmedUsers, (u) => {
+    let finalizedUsers: any[] = _.filter(this.users, {state: 'finalized'});
+    log.info(`\nfinalized user count by day (Central Time):`);
+    let usersLeft = _.size(finalizedUsers)
+    _.each(finalizedUsers, (u) => {
       let hash: number = u.wallet.announcementTransaction.hash;
       this.userRef(u).child(`transactions/${hash}/createdAt`).once('value', (snapshot: firebase.database.DataSnapshot) => {
         let createdAt: number = parseInt(snapshot.val());
         u.dayCreated = moment(createdAt).utcOffset(-300).startOf('day').format('YYYY-MM-DD');
         usersLeft--;
         if (usersLeft === 0) {
-          let groups = _.groupBy(confirmedUsers, 'dayCreated');
+          let groups = _.groupBy(finalizedUsers, 'dayCreated');
           let days: string[] = _.keys(groups).sort();
           let total: number = 0;
           _.each(days, (dayCreated: string) => {
@@ -583,8 +583,8 @@ export class DataManipulator {
   }
 
   displayDuplicateSignups() {
-    let confirmedUsers: any[] = _.filter(this.users, {state: 'announcement-confirmed'});
-    _.each(confirmedUsers, (u) => {
+    let finalizedUsers: any[] = _.filter(this.users, {state: 'announcement-confirmed'});
+    _.each(finalizedUsers, (u) => {
       this.userRef(u).child(`transactions`).once('value', (snapshot: firebase.database.DataSnapshot) => {
         let transactions: any = snapshot.val() || {};
         let signUpTransactions: any[] = _.filter(transactions, (t: any) => { return t.level === 0; });
