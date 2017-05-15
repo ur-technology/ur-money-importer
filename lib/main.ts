@@ -21,7 +21,7 @@ let dataManipulator = new DataManipulator(process.env, admin.database(), admin.a
 dataManipulator.displayStats();
 // dataManipulator.signOutDisabledUsers();
 // dataManipulator.unblockUsers();
-// dataManipulator.announceUsers();
+dataManipulator.announceUsers();
 // dataManipulator.broadcastMessages();
 // dataManipulator.showUserTransactions();
 // dataManipulator.notifyUsers2();

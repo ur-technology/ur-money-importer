@@ -213,15 +213,16 @@ export class DataManipulator {
     let reassigned = 0;
 
     let blockedUsers: any[] = _.filter(this.users, { state: 'blocked-by-upline' });
+    // let blockingStates = ['missing-password-and-wallet', 'disabled', 'missing-docs', 'waiting-for-review'];
     let blockingStates = ['missing-password-and-wallet', 'disabled'];
     _.each(blockedUsers, (u, uid) => {
       let sponsorState: string = this.sponsorState(u);
       let sponsor = this.getSponsor(u);
       if (_.includes(blockingStates, sponsorState)) {
-        log.info(`blockedUser userId=${u.userId}, state=${u.state}, sponsorState=${sponsorState}`);
-        let newSponsor = _.find(self.uplineUsers(self.getSponsor(u)), (uplineUser, index) => {
-          return index > 0 && !_.includes(blockingStates, sponsorState);
+        let newSponsor = _.find(self.uplineUsers(sponsor), (uplineUser, index) => {
+          return !_.includes(blockingStates, uplineUser.state);
         });
+        // log.info(`blockedUser userId=${u.userId}, email=${u.email}, state=${u.state}, sponsorState=${sponsorState}, newSponsor=${newSponsor}`);
         if (newSponsor) {
           // log.info(`${sponsor.email}\t${sponsor.state}\thttps://web.ur.technology/?admin-redirect=true&redirect=user&id=${sponsor.userId}`);
           u.oldSponsor = _.merge(_.clone(u.sponsor), { replacedAt: firebase.database.ServerValue.TIMESTAMP });
@@ -234,16 +235,24 @@ export class DataManipulator {
       }
     });
     blockedUsers = _.filter(blockedUsers, 'newSponsor');
+    log.info(`number of blockedUsers=${_.size(blockedUsers)}`);
+
     _.each(blockedUsers, (u, uid) => {
       u.sponsor = u.newSponsor;
       self.userRef(u).update({ oldSponsor: u.oldSponsor, sponsor: u.sponsor }).then(() => {
         log.info(`reassigned u.userId: ${u.userId}, u.oldSponsor.userId: ${u.oldSponsor.userId}, u.newSponsor.userId: ${u.newSponsor.userId}`);
       });
-      reassigned++;
     });
 
     self.fixDownlineInfo();
-    log.info(`${reassigned} blocked users were reassigned`);
+
+    // let blockingUserIds: any[] = _.uniq(_.map(blockedUsers, 'oldSponsor.userId'));
+    // let blockingUsers: any[] = _.map(blockingUserIds, (userId: string) => { return this.users[userId]; });
+    // log.info(`number of blockingUsers=${_.size(blockingUsers)}`);
+    // _.each(blockingUsers, (u: any) => {
+    //   log.info(`blockingUser email=${u.email}`);
+    // });
+
   }
 
   private referralUsers(u: any): any[] {
@@ -599,14 +608,19 @@ export class DataManipulator {
   openMissingFreshdeskTickets() {
     let usersWithReviewPending: any[] = _.filter(this.users, (u) => { return this.userState(u) === 'waiting-for-review'; });
     usersWithReviewPending = _.reject(usersWithReviewPending, 'freshdeskUrl');
+    usersWithReviewPending = _.reject(usersWithReviewPending, (u: any) => {
+      return _.includes(['RU', 'ID', 'VN', 'BY', 'UA'], u.countryCode);
+    });
+    usersWithReviewPending = _.reject(usersWithReviewPending, (u: any) => {
+      return _.some(this.uplineUsers(u), 'fraudSuspected');
+    });
+    usersWithReviewPending = _.filter(usersWithReviewPending, 'phone');
+    log.info(`number of users needing tickets: ${_.size(usersWithReviewPending)}`);
 
-    log.info(`about to open ${_.size(usersWithReviewPending)} tickets`);
-    // _.each(usersWithReviewPending, (u) => { log.info(`  ${u.userId} / ${u.name} / ${u.email} / ${u.phone} / ${u.state} / ${u.downlineSize} / ${u.freshdeskUrl}`); });
-
-    // let manualIDVerifier: ManualIDVerifier = new ManualIDVerifier( this.env, this.db );
-    // _.each(usersWithReviewPending, (u: any) => {
-    //   manualIDVerifier.openFreshdeskTicketIfNecessary(u.userId);
-    // });
+    let manualIDVerifier: ManualIDVerifier = new ManualIDVerifier( this.env, this.db );
+    _.each(usersWithReviewPending, (u: any) => {
+      manualIDVerifier.openFreshdeskTicketIfNecessary(u.userId);
+    });
   }
 
   fixSendUrTransactions() {
@@ -682,6 +696,18 @@ export class DataManipulator {
         log.debug(`  sent message '${messageText.substring(0,20)}' to ${phone}`);
         setTimeout(resolve, 250);
       });
+    });
+  }
+
+  fixRecords() {
+    let sender: any = _.find(this.users, { email: 'jreitano@ur.technology'});
+    let referrals: any[] = this.directReferrals(sender);
+
+    _.each(referrals, (referral: any, index: number) => {
+      if (referral.downlineSize === 0 && !referral.wallet) {
+        log.info(`you can delete referral ${referral.name}, email=${referral.email}`);
+        this.userRef(referral).remove();
+      }
     });
   }
 
